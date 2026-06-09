@@ -29,7 +29,12 @@ type Config struct {
 	S3SecretKey string
 	S3UseSSL    bool
 
-	// SMTP para notificaciones por correo (opcional).
+	// Correo (opcional). Preferimos la Web API de SendGrid (HTTPS), porque
+	// muchos PaaS (Railway incluido) bloquean los puertos SMTP salientes.
+	SendGridKey string // SENDGRID_API_KEY → usa la Web API por HTTPS
+	MailFrom    string // remitente verificado, ej "neXus <brayangp20@gmail.com>"
+
+	// SMTP como alternativa si no hay SENDGRID_API_KEY.
 	SMTPHost string
 	SMTPPort string
 	SMTPUser string
@@ -52,12 +57,15 @@ func Load() Config {
 		S3AccessKey:    os.Getenv("S3_ACCESS_KEY"),
 		S3SecretKey:    os.Getenv("S3_SECRET_KEY"),
 		S3UseSSL:       env("S3_USE_SSL", "true") != "false",
+		SendGridKey:    os.Getenv("SENDGRID_API_KEY"),
 		SMTPHost:       os.Getenv("SMTP_HOST"),
 		SMTPPort:       env("SMTP_PORT", "587"),
 		SMTPUser:       os.Getenv("SMTP_USER"),
 		SMTPPass:       os.Getenv("SMTP_PASS"),
 		SMTPFrom:       env("SMTP_FROM", "neXus <no-reply@nexus.app>"),
 	}
+	// El remitente: MAIL_FROM si existe, si no SMTP_FROM.
+	c.MailFrom = env("MAIL_FROM", c.SMTPFrom)
 	return c
 }
 
@@ -67,8 +75,8 @@ func (c Config) UsePostgres() bool {
 		strings.HasPrefix(c.DatabaseURL, "postgresql://")
 }
 
-// EmailEnabled indica si hay SMTP configurado.
-func (c Config) EmailEnabled() bool { return c.SMTPHost != "" }
+// EmailEnabled indica si hay un proveedor de correo configurado.
+func (c Config) EmailEnabled() bool { return c.SendGridKey != "" || c.SMTPHost != "" }
 
 func env(k, def string) string {
 	if v := os.Getenv(k); v != "" {
