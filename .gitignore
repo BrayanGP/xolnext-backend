@@ -1,0 +1,12 @@
+# Binarios compilados
+/nexus-backend
+/nexus-backend.exe
+*.exe
+
+# Base de datos SQLite local
+*.db
+*.db-shm
+*.db-wal
+
+# Entorno
+.env
