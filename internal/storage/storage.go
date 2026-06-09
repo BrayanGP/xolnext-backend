@@ -89,9 +89,20 @@ func newS3(cfg config.Config) (*s3Storage, error) {
 	if cfg.S3Endpoint == "" || cfg.S3Bucket == "" {
 		return nil, fmt.Errorf("S3_ENDPOINT y S3_BUCKET son obligatorios para STORAGE_BACKEND=s3")
 	}
-	client, err := minio.New(cfg.S3Endpoint, &minio.Options{
+	// minio.New espera solo el host; aceptamos también la URL completa.
+	endpoint := cfg.S3Endpoint
+	secure := cfg.S3UseSSL
+	if strings.HasPrefix(endpoint, "https://") {
+		endpoint = strings.TrimPrefix(endpoint, "https://")
+		secure = true
+	} else if strings.HasPrefix(endpoint, "http://") {
+		endpoint = strings.TrimPrefix(endpoint, "http://")
+		secure = false
+	}
+	endpoint = strings.TrimRight(endpoint, "/")
+	client, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.S3AccessKey, cfg.S3SecretKey, ""),
-		Secure: cfg.S3UseSSL,
+		Secure: secure,
 		Region: cfg.S3Region,
 	})
 	if err != nil {
@@ -109,15 +120,36 @@ func (s *s3Storage) Save(ctx context.Context, filename, contentType string, r io
 	if err != nil {
 		return "", err
 	}
-	// URL pública: si configuraste PUBLIC_BASE_URL para el bucket, úsala; si no,
-	// se asume acceso por endpoint/bucket/name.
-	scheme := "https"
-	if !s.cfg.S3UseSSL {
-		scheme = "http"
-	}
-	return fmt.Sprintf("%s://%s/%s/%s", scheme, s.cfg.S3Endpoint, s.bucket, name), nil
+	// Devolvemos una URL servida por el propio backend (proxy). Así los archivos
+	// son accesibles aunque el bucket sea privado, y la URL es estable.
+	return s.cfg.PublicBaseURL + "/files/" + name, nil
 }
 
+// FileServer transmite los objetos del bucket a través del backend, de modo que
+// no se requiere que el bucket sea de lectura pública.
 func (s *s3Storage) FileServer() (string, http.Handler, bool) {
-	return "", nil, false // S3 sirve los archivos directamente
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := strings.TrimPrefix(r.URL.Path, "/files/")
+		if key == "" {
+			http.NotFound(w, r)
+			return
+		}
+		obj, err := s.client.GetObject(r.Context(), s.bucket, key, minio.GetObjectOptions{})
+		if err != nil {
+			http.Error(w, "no encontrado", http.StatusNotFound)
+			return
+		}
+		defer obj.Close()
+		info, err := obj.Stat()
+		if err != nil {
+			http.Error(w, "no encontrado", http.StatusNotFound)
+			return
+		}
+		if info.ContentType != "" {
+			w.Header().Set("Content-Type", info.ContentType)
+		}
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = io.Copy(w, obj)
+	})
+	return "/files/", h, true
 }
