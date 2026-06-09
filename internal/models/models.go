@@ -120,6 +120,25 @@ type Notification struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+// Roles de usuario.
+const (
+	RoleWorker  = "worker"
+	RoleCompany = "company"
+	RoleAdmin   = "admin"
+)
+
+// User es una cuenta con la que se inicia sesión. Queda enlazada al perfil de
+// trabajador o de empresa según su rol.
+type User struct {
+	ID           string    `json:"id"`
+	Email        string    `json:"email"`
+	PasswordHash string    `json:"-"` // nunca se serializa hacia el cliente
+	Role         string    `json:"role"`
+	WorkerID     string    `json:"workerId,omitempty"`
+	CompanyID    string    `json:"companyId,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
 // DisclaimerLegal es el aviso obligatorio del MVP (requerimiento legal básico).
 const DisclaimerLegal = "neXus funciona como plataforma de conexión entre trabajadores y empresas. " +
 	"neXus no actúa como empleador, no procesa pagos, no garantiza contratación y no administra nómina. " +

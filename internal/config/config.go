@@ -14,6 +14,7 @@ type Config struct {
 	Addr        string // dirección de escucha, ej ":8080"
 	DatabaseURL string // vacío => SQLite local; postgres://... => Postgres
 	SQLitePath  string // ruta del archivo SQLite cuando no hay DATABASE_URL
+	JWTSecret   string // clave para firmar los tokens de sesión
 
 	// Almacenamiento de archivos (foto de perfil, certificados).
 	StorageBackend string // "local" (default) | "s3"
@@ -41,6 +42,7 @@ func Load() Config {
 		Addr:           ":" + env("PORT", "8080"),
 		DatabaseURL:    os.Getenv("DATABASE_URL"),
 		SQLitePath:     env("NEXUS_DB", "nexus.db"),
+		JWTSecret:      os.Getenv("JWT_SECRET"),
 		StorageBackend: env("STORAGE_BACKEND", "local"),
 		UploadDir:      env("UPLOAD_DIR", "uploads"),
 		PublicBaseURL:  strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),

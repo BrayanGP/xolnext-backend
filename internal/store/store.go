@@ -23,7 +23,10 @@ import (
 	_ "modernc.org/sqlite"             // driver "sqlite"
 )
 
-var ErrNotFound = errors.New("no encontrado")
+var (
+	ErrNotFound   = errors.New("no encontrado")
+	ErrEmailTaken = errors.New("el correo ya está registrado")
+)
 
 type Store struct {
 	db       *sql.DB
@@ -82,6 +85,10 @@ CREATE TABLE IF NOT EXISTS candidates (
 );
 CREATE TABLE IF NOT EXISTS notifications (
   id TEXT PRIMARY KEY, audience TEXT, data TEXT NOT NULL, created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT
 );`
 	// Ambos motores aceptan ejecutar varias sentencias separadas por ';' una a una.
 	for _, stmt := range strings.Split(schema, ";") {
@@ -446,4 +453,57 @@ func (s *Store) ListNotifications(audience string) ([]models.Notification, error
 		out = append(out, n)
 	}
 	return out, rows.Err()
+}
+
+// ---------------- Users ----------------
+
+func normalizeEmail(email string) string { return strings.ToLower(strings.TrimSpace(email)) }
+
+// CreateUser registra un usuario. Devuelve ErrEmailTaken si el correo ya existe.
+func (s *Store) CreateUser(u *models.User) error {
+	u.Email = normalizeEmail(u.Email)
+	if u.ID == "" {
+		u.ID = uuid.NewString()
+	}
+	if u.CreatedAt.IsZero() {
+		u.CreatedAt = time.Now().UTC()
+	}
+	if _, err := s.GetUserByEmail(u.Email); err == nil {
+		return ErrEmailTaken
+	}
+	// El hash de contraseña se guarda en su propia columna (no en el JSON, que
+	// lo omite por seguridad) para poder verificarlo al iniciar sesión.
+	return s.exec(
+		`INSERT INTO users (id,email,password_hash,data,created_at) VALUES (?,?,?,?,?)`,
+		u.ID, u.Email, u.PasswordHash, marshal(u), u.CreatedAt.Format(time.RFC3339))
+}
+
+func (s *Store) GetUserByEmail(email string) (*models.User, error) {
+	return s.scanUser(`SELECT password_hash, data FROM users WHERE email=?`, normalizeEmail(email))
+}
+
+func (s *Store) GetUserByID(id string) (*models.User, error) {
+	return s.scanUser(`SELECT password_hash, data FROM users WHERE id=?`, id)
+}
+
+func (s *Store) CountUsers() (int, error) {
+	var n int
+	err := s.queryRow(`SELECT COUNT(*) FROM users`).Scan(&n)
+	return n, err
+}
+
+func (s *Store) scanUser(q, arg string) (*models.User, error) {
+	var hash, data string
+	if err := s.queryRow(q, arg).Scan(&hash, &data); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	var u models.User
+	if err := json.Unmarshal([]byte(data), &u); err != nil {
+		return nil, err
+	}
+	u.PasswordHash = hash // proviene de su columna, no del JSON
+	return &u, nil
 }

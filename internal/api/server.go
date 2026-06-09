@@ -23,10 +23,11 @@ type Server struct {
 	hub     *notify.Hub
 	storage storage.Storage
 	mailer  *mailer.Mailer
+	secret  string
 }
 
-func New(st *store.Store, hub *notify.Hub, fs storage.Storage, m *mailer.Mailer) *Server {
-	return &Server{store: st, hub: hub, storage: fs, mailer: m}
+func New(st *store.Store, hub *notify.Hub, fs storage.Storage, m *mailer.Mailer, secret string) *Server {
+	return &Server{store: st, hub: hub, storage: fs, mailer: m, secret: secret}
 }
 
 // Routes construye el http.Handler con todas las rutas y el middleware CORS.
@@ -36,34 +37,42 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/legal", s.legal)
 
+	// Autenticación (públicas)
+	mux.HandleFunc("POST /api/auth/register", s.register)
+	mux.HandleFunc("POST /api/auth/login", s.login)
+	mux.HandleFunc("GET /api/auth/me", s.withAuth(s.me))
+
+	admin := models.RoleAdmin
+
 	// Trabajadores
-	mux.HandleFunc("POST /api/workers", s.createWorker)
-	mux.HandleFunc("GET /api/workers", s.listWorkers) // admin (filtros)
-	mux.HandleFunc("GET /api/workers/{id}", s.getWorker)
-	mux.HandleFunc("PATCH /api/workers/{id}/status", s.updateWorkerStatus)
-	mux.HandleFunc("POST /api/workers/{id}/photo", s.uploadPhoto)
-	mux.HandleFunc("POST /api/workers/{id}/certificates", s.uploadCertificate)
+	mux.HandleFunc("GET /api/workers", s.requireRole(admin, s.listWorkers)) // directorio: solo admin
+	mux.HandleFunc("GET /api/workers/{id}", s.withAuth(s.getWorker))        // dueño o admin
+	mux.HandleFunc("PATCH /api/workers/{id}/status", s.withAuth(s.updateWorkerStatus))
+	mux.HandleFunc("POST /api/workers/{id}/photo", s.withAuth(s.uploadPhoto))
+	mux.HandleFunc("POST /api/workers/{id}/certificates", s.withAuth(s.uploadCertificate))
+	mux.HandleFunc("PUT /api/workers/{id}", s.withAuth(s.updateWorker)) // dueño o admin
 
 	// Empresas
-	mux.HandleFunc("POST /api/companies", s.createCompany)
-	mux.HandleFunc("GET /api/companies", s.listCompanies)
+	mux.HandleFunc("GET /api/companies", s.requireRole(admin, s.listCompanies)) // solo admin
+	mux.HandleFunc("GET /api/companies/{id}", s.withAuth(s.getCompany))          // dueño o admin
+	mux.HandleFunc("PUT /api/companies/{id}", s.withAuth(s.updateCompany))       // dueño o admin
 
 	// Solicitudes
-	mux.HandleFunc("POST /api/requests", s.createRequest)
-	mux.HandleFunc("GET /api/requests", s.listRequests) // admin
-	mux.HandleFunc("GET /api/requests/{id}", s.getRequest)
-	mux.HandleFunc("PATCH /api/requests/{id}/status", s.updateRequestStatus)
+	mux.HandleFunc("POST /api/requests", s.requireRole(models.RoleCompany, s.createRequest))
+	mux.HandleFunc("GET /api/requests", s.withAuth(s.listRequests)) // admin: todas / empresa: las suyas
+	mux.HandleFunc("GET /api/requests/{id}", s.withAuth(s.getRequest))
+	mux.HandleFunc("PATCH /api/requests/{id}/status", s.requireRole(admin, s.updateRequestStatus))
 
 	// Candidatos
-	mux.HandleFunc("POST /api/requests/{id}/candidates", s.addCandidate) // admin arma lista
-	mux.HandleFunc("GET /api/requests/{id}/candidates", s.listCandidates)         // admin (interno)
-	mux.HandleFunc("GET /api/requests/{id}/candidates/public", s.publicCandidates) // empresa (limitado)
-	mux.HandleFunc("GET /api/requests/{id}/candidates.pdf", s.candidatesPDF)        // exportar PDF
+	mux.HandleFunc("POST /api/requests/{id}/candidates", s.requireRole(admin, s.addCandidate))
+	mux.HandleFunc("GET /api/requests/{id}/candidates", s.requireRole(admin, s.listCandidates))
+	mux.HandleFunc("GET /api/requests/{id}/candidates/public", s.withAuth(s.publicCandidates))
+	mux.HandleFunc("GET /api/requests/{id}/candidates.pdf", s.withAuth(s.candidatesPDF))
 
-	// Notificaciones directas
-	mux.HandleFunc("POST /api/notifications", s.createNotification)
-	mux.HandleFunc("GET /api/notifications", s.listNotifications)
-	mux.HandleFunc("GET /api/stream", s.stream) // SSE
+	// Notificaciones directas (la audiencia se deriva del token)
+	mux.HandleFunc("POST /api/notifications", s.requireRole(admin, s.createNotification))
+	mux.HandleFunc("GET /api/notifications", s.withAuth(s.listNotifications))
+	mux.HandleFunc("GET /api/stream", s.withAuth(s.stream)) // SSE
 
 	// Servir archivos subidos (solo backend de almacenamiento local/Volume).
 	if prefix, h, ok := s.storage.FileServer(); ok {
@@ -122,25 +131,38 @@ func (s *Server) legal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"disclaimer": models.DisclaimerLegal})
 }
 
-func (s *Server) createWorker(w http.ResponseWriter, r *http.Request) {
+// updateWorker actualiza el perfil de un trabajador. Solo el dueño o un admin.
+func (s *Server) updateWorker(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	u := s.currentUser(r)
+	if !u.IsAdmin() && u.WorkerID != id {
+		writeErr(w, http.StatusForbidden, "solo puedes editar tu propio perfil")
+		return
+	}
+	existing, err := s.store.GetWorker(id)
+	if err != nil {
+		s.handleStoreErr(w, err)
+		return
+	}
 	var wk models.Worker
 	if err := decode(r, &wk); err != nil {
 		writeErr(w, http.StatusBadRequest, "JSON inválido")
 		return
 	}
-	if wk.NombreCompleto == "" || wk.OficioPrincipal == "" {
-		writeErr(w, http.StatusBadRequest, "nombreCompleto y oficioPrincipal son obligatorios")
-		return
-	}
+	wk.ID = id
+	wk.CreatedAt = existing.CreatedAt
 	if wk.Disponibilidad == "" {
 		wk.Disponibilidad = models.WorkerDisponible
+	}
+	// Un no-admin no puede asignarse estados operativos (confirmado/asignado…).
+	if !u.IsAdmin() {
+		wk.Estado = wk.Disponibilidad
 	}
 	if err := s.store.CreateWorker(&wk); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.notifyAdmin("Nuevo trabajador", fmt.Sprintf("%s (%s) se registró", wk.NombreCompleto, wk.OficioPrincipal), "info")
-	writeJSON(w, http.StatusCreated, wk)
+	writeJSON(w, http.StatusOK, wk)
 }
 
 func (s *Server) listWorkers(w http.ResponseWriter, r *http.Request) {
@@ -154,7 +176,13 @@ func (s *Server) listWorkers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getWorker(w http.ResponseWriter, r *http.Request) {
-	wk, err := s.store.GetWorker(r.PathValue("id"))
+	id := r.PathValue("id")
+	u := s.currentUser(r)
+	if !u.IsAdmin() && u.WorkerID != id {
+		writeErr(w, http.StatusForbidden, "no autorizado")
+		return
+	}
+	wk, err := s.store.GetWorker(id)
 	if err != nil {
 		s.handleStoreErr(w, err)
 		return
@@ -163,6 +191,8 @@ func (s *Server) getWorker(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateWorkerStatus(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	u := s.currentUser(r)
 	var body struct {
 		Estado string `json:"estado"`
 	}
@@ -170,7 +200,14 @@ func (s *Server) updateWorkerStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "estado requerido")
 		return
 	}
-	wk, err := s.store.UpdateWorkerStatus(r.PathValue("id"), body.Estado)
+	// El dueño solo puede cambiar su disponibilidad; los estados operativos
+	// (invitado/confirmado/asignado) son potestad del admin.
+	ownStates := body.Estado == models.WorkerDisponible || body.Estado == models.WorkerNoDisponible
+	if !u.IsAdmin() && !(u.WorkerID == id && ownStates) {
+		writeErr(w, http.StatusForbidden, "no autorizado para este cambio de estado")
+		return
+	}
+	wk, err := s.store.UpdateWorkerStatus(id, body.Estado)
 	if err != nil {
 		s.handleStoreErr(w, err)
 		return
@@ -180,22 +217,46 @@ func (s *Server) updateWorkerStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, wk)
 }
 
-func (s *Server) createCompany(w http.ResponseWriter, r *http.Request) {
+// updateCompany actualiza los datos de una empresa. Solo el dueño o un admin.
+func (s *Server) updateCompany(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	u := s.currentUser(r)
+	if !u.IsAdmin() && u.CompanyID != id {
+		writeErr(w, http.StatusForbidden, "solo puedes editar tu propia empresa")
+		return
+	}
+	existing, err := s.store.GetCompany(id)
+	if err != nil {
+		s.handleStoreErr(w, err)
+		return
+	}
 	var c models.Company
 	if err := decode(r, &c); err != nil {
 		writeErr(w, http.StatusBadRequest, "JSON inválido")
 		return
 	}
-	if c.NombreEmpresa == "" || c.PersonaContacto == "" {
-		writeErr(w, http.StatusBadRequest, "nombreEmpresa y personaContacto son obligatorios")
-		return
-	}
+	c.ID = id
+	c.CreatedAt = existing.CreatedAt
 	if err := s.store.CreateCompany(&c); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.notifyAdmin("Nueva empresa", c.NombreEmpresa+" se registró", "info")
-	writeJSON(w, http.StatusCreated, c)
+	writeJSON(w, http.StatusOK, c)
+}
+
+func (s *Server) getCompany(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	u := s.currentUser(r)
+	if !u.IsAdmin() && u.CompanyID != id {
+		writeErr(w, http.StatusForbidden, "no autorizado")
+		return
+	}
+	c, err := s.store.GetCompany(id)
+	if err != nil {
+		s.handleStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, c)
 }
 
 func (s *Server) listCompanies(w http.ResponseWriter, r *http.Request) {
@@ -217,6 +278,8 @@ func (s *Server) createRequest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "tipoTrabajador es obligatorio")
 		return
 	}
+	// La solicitud pertenece a la empresa autenticada (no se confía en el body).
+	rq.CompanyID = s.currentUser(r).CompanyID
 	rq.Estado = models.RequestNueva
 	if err := s.store.CreateRequest(&rq); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -228,10 +291,21 @@ func (s *Server) createRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
 	rs, err := s.store.ListRequests(r.URL.Query().Get("estado"))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// La empresa solo ve sus propias solicitudes; el admin las ve todas.
+	if !u.IsAdmin() {
+		filtered := make([]models.Request, 0, len(rs))
+		for _, rq := range rs {
+			if rq.CompanyID == u.CompanyID {
+				filtered = append(filtered, rq)
+			}
+		}
+		rs = filtered
 	}
 	writeJSON(w, http.StatusOK, rs)
 }
@@ -240,6 +314,11 @@ func (s *Server) getRequest(w http.ResponseWriter, r *http.Request) {
 	rq, err := s.store.GetRequest(r.PathValue("id"))
 	if err != nil {
 		s.handleStoreErr(w, err)
+		return
+	}
+	u := s.currentUser(r)
+	if !u.IsAdmin() && rq.CompanyID != u.CompanyID {
+		writeErr(w, http.StatusForbidden, "no autorizado")
 		return
 	}
 	writeJSON(w, http.StatusOK, rq)
@@ -303,9 +382,24 @@ func (s *Server) listCandidates(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, cs)
 }
 
+// canAccessRequest indica si el usuario puede ver una solicitud (admin o dueña).
+func (s *Server) canAccessRequest(r *http.Request, requestID string) bool {
+	u := s.currentUser(r)
+	if u.IsAdmin() {
+		return true
+	}
+	rq, err := s.store.GetRequest(requestID)
+	return err == nil && rq.CompanyID == u.CompanyID
+}
+
 // publicCandidates devuelve SOLO los datos que la empresa puede ver.
 func (s *Server) publicCandidates(w http.ResponseWriter, r *http.Request) {
-	cs, err := s.store.PublicCandidates(r.PathValue("id"))
+	id := r.PathValue("id")
+	if !s.canAccessRequest(r, id) {
+		writeErr(w, http.StatusForbidden, "no autorizado")
+		return
+	}
+	cs, err := s.store.PublicCandidates(id)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -327,11 +421,20 @@ func (s *Server) createNotification(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, n)
 }
 
-func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
-	aud := r.URL.Query().Get("audience")
-	if aud == "" {
-		aud = "admin"
+// audienceForUser determina a qué notificaciones tiene derecho el usuario.
+func audienceForUser(u *AuthUser) string {
+	switch u.Role {
+	case models.RoleWorker:
+		return "worker:" + u.WorkerID
+	case models.RoleCompany:
+		return "company:" + u.CompanyID
+	default:
+		return "admin"
 	}
+}
+
+func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
+	aud := audienceForUser(s.currentUser(r))
 	ns, err := s.store.ListNotifications(aud)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -340,12 +443,9 @@ func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ns)
 }
 
-// stream abre un canal SSE: GET /api/stream?audience=worker:<id>
+// stream abre un canal SSE con la audiencia derivada del token.
 func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
-	aud := r.URL.Query().Get("audience")
-	if aud == "" {
-		aud = "admin"
-	}
+	aud := audienceForUser(s.currentUser(r))
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, http.StatusInternalServerError, "streaming no soportado")
@@ -424,8 +524,15 @@ func (s *Server) uploadCertificate(w http.ResponseWriter, r *http.Request) {
 }
 
 // readWorkerUpload valida el trabajador y extrae el archivo del form multipart.
+// Solo el dueño del perfil o un admin pueden subir archivos.
 func (s *Server) readWorkerUpload(w http.ResponseWriter, r *http.Request) (*models.Worker, multipart.File, *multipart.FileHeader, bool) {
-	wk, err := s.store.GetWorker(r.PathValue("id"))
+	id := r.PathValue("id")
+	u := s.currentUser(r)
+	if !u.IsAdmin() && u.WorkerID != id {
+		writeErr(w, http.StatusForbidden, "solo puedes subir archivos a tu propio perfil")
+		return nil, nil, nil, false
+	}
+	wk, err := s.store.GetWorker(id)
 	if err != nil {
 		s.handleStoreErr(w, err)
 		return nil, nil, nil, false
@@ -445,6 +552,10 @@ func (s *Server) readWorkerUpload(w http.ResponseWriter, r *http.Request) (*mode
 // candidatesPDF genera y devuelve el PDF de la lista de candidatos (datos públicos).
 func (s *Server) candidatesPDF(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !s.canAccessRequest(r, id) {
+		writeErr(w, http.StatusForbidden, "no autorizado")
+		return
+	}
 	req, err := s.store.GetRequest(id)
 	if err != nil {
 		s.handleStoreErr(w, err)

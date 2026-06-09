@@ -39,6 +39,16 @@ y 1 solicitud) para poder probar el panel de administración de inmediato.
 - `GET /api/health` — estado del servicio
 - `GET /api/legal` — texto del aviso legal obligatorio
 
+### Autenticación (JWT)
+- `POST /api/auth/register` — body `{ email, password, role: "worker"|"company", nombre }` → crea cuenta + perfil y devuelve `{ token, user }`
+- `POST /api/auth/login` — body `{ email, password }` → `{ token, user }`
+- `GET /api/auth/me` — usuario actual (requiere `Authorization: Bearer <token>`)
+
+Todos los endpoints siguientes requieren token. Autorización: el **directorio de
+trabajadores y el panel** son solo de `admin`; cada trabajador/empresa solo puede
+ver y editar **lo suyo**. Define `JWT_SECRET` en producción. Cuenta admin inicial
+sembrada: **admin@nexus.app / admin123** (cámbiala).
+
 ### Trabajadores
 - `POST /api/workers` — registro de trabajador
 - `GET /api/workers?ciudad=&oficio=&disponibilidad=` — listado con filtros (admin)
