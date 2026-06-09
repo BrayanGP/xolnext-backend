@@ -6,21 +6,27 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"time"
 
+	"github.com/BrayanGP/nexus-backend/internal/mailer"
 	"github.com/BrayanGP/nexus-backend/internal/models"
 	"github.com/BrayanGP/nexus-backend/internal/notify"
+	"github.com/BrayanGP/nexus-backend/internal/pdfexport"
+	"github.com/BrayanGP/nexus-backend/internal/storage"
 	"github.com/BrayanGP/nexus-backend/internal/store"
 )
 
 type Server struct {
-	store *store.Store
-	hub   *notify.Hub
+	store   *store.Store
+	hub     *notify.Hub
+	storage storage.Storage
+	mailer  *mailer.Mailer
 }
 
-func New(st *store.Store, hub *notify.Hub) *Server {
-	return &Server{store: st, hub: hub}
+func New(st *store.Store, hub *notify.Hub, fs storage.Storage, m *mailer.Mailer) *Server {
+	return &Server{store: st, hub: hub, storage: fs, mailer: m}
 }
 
 // Routes construye el http.Handler con todas las rutas y el middleware CORS.
@@ -35,6 +41,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/workers", s.listWorkers) // admin (filtros)
 	mux.HandleFunc("GET /api/workers/{id}", s.getWorker)
 	mux.HandleFunc("PATCH /api/workers/{id}/status", s.updateWorkerStatus)
+	mux.HandleFunc("POST /api/workers/{id}/photo", s.uploadPhoto)
+	mux.HandleFunc("POST /api/workers/{id}/certificates", s.uploadCertificate)
 
 	// Empresas
 	mux.HandleFunc("POST /api/companies", s.createCompany)
@@ -50,11 +58,17 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/requests/{id}/candidates", s.addCandidate) // admin arma lista
 	mux.HandleFunc("GET /api/requests/{id}/candidates", s.listCandidates)         // admin (interno)
 	mux.HandleFunc("GET /api/requests/{id}/candidates/public", s.publicCandidates) // empresa (limitado)
+	mux.HandleFunc("GET /api/requests/{id}/candidates.pdf", s.candidatesPDF)        // exportar PDF
 
 	// Notificaciones directas
 	mux.HandleFunc("POST /api/notifications", s.createNotification)
 	mux.HandleFunc("GET /api/notifications", s.listNotifications)
 	mux.HandleFunc("GET /api/stream", s.stream) // SSE
+
+	// Servir archivos subidos (solo backend de almacenamiento local/Volume).
+	if prefix, h, ok := s.storage.FileServer(); ok {
+		mux.Handle(prefix, h)
+	}
 
 	return cors(logging(mux))
 }
@@ -248,6 +262,11 @@ func (s *Server) updateRequestStatus(w http.ResponseWriter, r *http.Request) {
 	if body.Estado == models.RequestCandidatosEnvia && rq.CompanyID != "" {
 		s.hub.Broadcast(s.persistNotif("company:"+rq.CompanyID, "Candidatos enviados",
 			"neXus te envió una lista de candidatos para tu solicitud.", "candidatos"))
+		if co, err := s.store.GetCompany(rq.CompanyID); err == nil {
+			go s.mailer.Send(co.Correo, "neXus · Candidatos enviados",
+				"Hola "+co.PersonaContacto+",\n\nneXus preparó una lista de candidatos para tu solicitud de "+
+					rq.TipoTrabajador+". Ingresa a la app para revisarla.\n\n— neXus")
+		}
 	}
 	writeJSON(w, http.StatusOK, rq)
 }
@@ -267,6 +286,11 @@ func (s *Server) addCandidate(w http.ResponseWriter, r *http.Request) {
 	// Notificar al trabajador que fue invitado a una oportunidad.
 	s.hub.Broadcast(s.persistNotif("worker:"+c.WorkerID, "Nueva oportunidad",
 		"Fuiste incluido como candidato en una solicitud.", "oportunidad"))
+	if wk, err := s.store.GetWorker(c.WorkerID); err == nil {
+		go s.mailer.Send(wk.Correo, "neXus · Nueva oportunidad",
+			"Hola "+wk.NombreCompleto+",\n\nFuiste incluido como candidato en una solicitud de personal en neXus. "+
+				"Mantente disponible; el equipo de neXus dará seguimiento.\n\n— neXus")
+	}
 	writeJSON(w, http.StatusCreated, c)
 }
 
@@ -353,6 +377,93 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// ---------------- archivos: foto y certificados ----------------
+
+const maxUpload = 10 << 20 // 10 MB
+
+// uploadPhoto recibe la foto de perfil del trabajador (campo form "file").
+func (s *Server) uploadPhoto(w http.ResponseWriter, r *http.Request) {
+	wk, file, header, ok := s.readWorkerUpload(w, r)
+	if !ok {
+		return
+	}
+	defer file.Close()
+	url, err := s.storage.Save(r.Context(), header.Filename, header.Header.Get("Content-Type"), file, header.Size)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	wk.FotoURL = url
+	if err := s.store.CreateWorker(wk); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, wk)
+}
+
+// uploadCertificate agrega un archivo de certificación al trabajador.
+func (s *Server) uploadCertificate(w http.ResponseWriter, r *http.Request) {
+	wk, file, header, ok := s.readWorkerUpload(w, r)
+	if !ok {
+		return
+	}
+	defer file.Close()
+	url, err := s.storage.Save(r.Context(), header.Filename, header.Header.Get("Content-Type"), file, header.Size)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	wk.CertificadosArchivos = append(wk.CertificadosArchivos, url)
+	if err := s.store.CreateWorker(wk); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, wk)
+}
+
+// readWorkerUpload valida el trabajador y extrae el archivo del form multipart.
+func (s *Server) readWorkerUpload(w http.ResponseWriter, r *http.Request) (*models.Worker, multipart.File, *multipart.FileHeader, bool) {
+	wk, err := s.store.GetWorker(r.PathValue("id"))
+	if err != nil {
+		s.handleStoreErr(w, err)
+		return nil, nil, nil, false
+	}
+	if err := r.ParseMultipartForm(maxUpload); err != nil {
+		writeErr(w, http.StatusBadRequest, "archivo inválido o demasiado grande (máx 10MB)")
+		return nil, nil, nil, false
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "falta el campo 'file'")
+		return nil, nil, nil, false
+	}
+	return wk, file, header, true
+}
+
+// candidatesPDF genera y devuelve el PDF de la lista de candidatos (datos públicos).
+func (s *Server) candidatesPDF(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	req, err := s.store.GetRequest(id)
+	if err != nil {
+		s.handleStoreErr(w, err)
+		return
+	}
+	cands, err := s.store.PublicCandidates(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	pdf, err := pdfexport.CandidateList(req, cands)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/pdf")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="candidatos-%s.pdf"`, id))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(pdf)
 }
 
 // ---------------- utilidades internas ----------------

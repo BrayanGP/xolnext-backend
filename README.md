@@ -44,6 +44,8 @@ y 1 solicitud) para poder probar el panel de administración de inmediato.
 - `GET /api/workers?ciudad=&oficio=&disponibilidad=` — listado con filtros (admin)
 - `GET /api/workers/{id}`
 - `PATCH /api/workers/{id}/status` — body `{ "estado": "confirmado" }`
+- `POST /api/workers/{id}/photo` — subir foto de perfil (multipart, campo `file`)
+- `POST /api/workers/{id}/certificates` — subir certificado como archivo (multipart, campo `file`)
 
 ### Empresas
 - `POST /api/companies` — registro de empresa
@@ -61,6 +63,8 @@ y 1 solicitud) para poder probar el panel de administración de inmediato.
 - `GET /api/requests/{id}/candidates/public` — **vista de la empresa**: solo
   nombre, ciudad, oficio, experiencia, certificaciones y estado. Sin teléfono,
   correo ni dirección.
+- `GET /api/requests/{id}/candidates.pdf` — exporta la lista de candidatos en PDF
+  (solo datos públicos).
 
 ### Notificaciones directas
 - `POST /api/notifications` — body `{ "audience": "worker:<id>", "titulo": "...", "cuerpo": "...", "tipo": "oportunidad" }`
@@ -78,3 +82,22 @@ y 1 solicitud) para poder probar el panel de administración de inmediato.
 La empresa **nunca** ve el directorio completo de trabajadores. Solo recibe la
 lista que el administrador confirma y envía, y únicamente con los campos públicos
 (ver `/candidates/public`).
+
+## Despliegue en Railway
+
+El repo incluye `Dockerfile` y `railway.json` (healthcheck en `/api/health`).
+
+1. **Crea el servicio** en Railway apuntando a este repo (detecta el Dockerfile).
+2. **Postgres:** agrega un plugin Postgres en el mismo proyecto. Railway expone
+   `DATABASE_URL`; referénciala en el servicio del backend
+   (`DATABASE_URL=${{Postgres.DATABASE_URL}}`). Sin ella, usa SQLite.
+3. **Volume:** monta un Volume en el servicio con ruta `/data` (el Dockerfile ya
+   usa `UPLOAD_DIR=/data/uploads`) para que fotos y certificados persistan.
+4. **PUBLIC_BASE_URL:** ponla con la URL pública del backend
+   (`https://<servicio>.up.railway.app`) para que los links de archivos sean válidos.
+5. *(Opcional)* **S3:** `STORAGE_BACKEND=s3` + `S3_*` para usar un bucket en vez del Volume.
+6. *(Opcional)* **Correo:** `SMTP_*` para enviar notificaciones por correo.
+
+Todas las variables están documentadas en [`.env.example`](.env.example).
+
+> El backend genera datos de demostración solo si la base está vacía.

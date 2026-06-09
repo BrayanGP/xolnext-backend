@@ -1,56 +1,66 @@
 // Command nexus-backend es el servidor de la plataforma neXus.
 //
 // Expone una API REST + stream SSE para conectar trabajadores, empresas y un
-// panel de administración interno. Usa SQLite (modernc, puro-Go) y no requiere
-// dependencias externas en tiempo de ejecución.
+// panel de administración interno.
+//
+// Configuración por entorno (pensado para Railway):
+//   - DATABASE_URL: si es postgres://… usa Postgres; si no, SQLite local.
+//   - PORT: puerto de escucha (Railway lo inyecta).
+//   - UPLOAD_DIR / Volume: dónde guardar fotos y certificados.
+//   - STORAGE_BACKEND=s3 + S3_*: usar bucket S3/R2/MinIO en vez del disco.
+//   - SMTP_*: notificaciones por correo (opcional).
 package main
 
 import (
 	"log"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/BrayanGP/nexus-backend/internal/api"
+	"github.com/BrayanGP/nexus-backend/internal/config"
+	"github.com/BrayanGP/nexus-backend/internal/mailer"
 	"github.com/BrayanGP/nexus-backend/internal/models"
 	"github.com/BrayanGP/nexus-backend/internal/notify"
+	"github.com/BrayanGP/nexus-backend/internal/storage"
 	"github.com/BrayanGP/nexus-backend/internal/store"
 )
 
 func main() {
-	addr := getenv("NEXUS_ADDR", ":8080")
-	dbPath := getenv("NEXUS_DB", "nexus.db")
+	cfg := config.Load()
 
-	st, err := store.Open(dbPath)
+	st, err := store.Open(cfg.DatabaseURL, cfg.SQLitePath)
 	if err != nil {
 		log.Fatalf("no se pudo abrir la base de datos: %v", err)
 	}
 	defer st.Close()
 
+	fs, err := storage.New(cfg)
+	if err != nil {
+		log.Fatalf("no se pudo inicializar el almacenamiento: %v", err)
+	}
+
 	seed(st)
 
 	hub := notify.NewHub()
-	srv := api.New(st, hub)
+	mail := mailer.New(cfg)
+	srv := api.New(st, hub, fs, mail)
 
 	httpSrv := &http.Server{
-		Addr:         addr,
+		Addr:         cfg.Addr,
 		Handler:      srv.Routes(),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 0, // 0: necesario para el stream SSE de larga duración
 		IdleTimeout:  60 * time.Second,
 	}
 
-	log.Printf("neXus backend escuchando en %s (db: %s)", addr, dbPath)
+	engine := "SQLite"
+	if cfg.UsePostgres() {
+		engine = "Postgres"
+	}
+	log.Printf("neXus backend escuchando en %s (db: %s, correo: %v)", cfg.Addr, engine, cfg.EmailEnabled())
 	if err := httpSrv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
-}
-
-func getenv(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
 }
 
 // seed crea datos de demostración la primera vez (idempotente por contenido).

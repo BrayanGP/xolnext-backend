@@ -1,32 +1,61 @@
-// Package store implementa la persistencia en SQLite usando el driver puro-Go
-// modernc.org/sqlite (no requiere cgo ni un compilador de C en Windows).
+// Package store implementa la persistencia.
+//
+// Soporta dos motores con el mismo código:
+//   - SQLite (driver puro-Go modernc.org/sqlite) para desarrollo local.
+//   - Postgres (driver pgx) para producción en Railway (vía DATABASE_URL).
+//
+// El esquema guarda cada entidad como JSON en una columna TEXT, lo que mantiene
+// el SQL portátil entre ambos motores. Los upserts usan `ON CONFLICT ... DO
+// UPDATE` (soportado por SQLite >= 3.24 y por Postgres).
 package store
 
 import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/BrayanGP/nexus-backend/internal/models"
 	"github.com/google/uuid"
-	_ "modernc.org/sqlite"
+	_ "github.com/jackc/pgx/v5/stdlib" // driver "pgx"
+	_ "modernc.org/sqlite"             // driver "sqlite"
 )
 
 var ErrNotFound = errors.New("no encontrado")
 
 type Store struct {
-	db *sql.DB
+	db       *sql.DB
+	postgres bool
 }
 
-// Open abre (o crea) la base de datos SQLite en path y aplica el esquema.
-func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+// Open abre la base de datos. Si databaseURL es un DSN de Postgres se usa
+// Postgres; en cualquier otro caso se usa SQLite en sqlitePath.
+func Open(databaseURL, sqlitePath string) (*Store, error) {
+	postgres := strings.HasPrefix(databaseURL, "postgres://") ||
+		strings.HasPrefix(databaseURL, "postgresql://")
+
+	var (
+		db  *sql.DB
+		err error
+	)
+	if postgres {
+		db, err = sql.Open("pgx", databaseURL)
+	} else {
+		db, err = sql.Open("sqlite", sqlitePath)
+	}
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1) // SQLite: un solo escritor evita "database is locked"
-	s := &Store{db: db}
+	if !postgres {
+		db.SetMaxOpenConns(1) // SQLite: un solo escritor evita "database is locked"
+	}
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("conectando a la base de datos: %w", err)
+	}
+
+	s := &Store{db: db, postgres: postgres}
 	if err := s.migrate(); err != nil {
 		return nil, err
 	}
@@ -54,13 +83,60 @@ CREATE TABLE IF NOT EXISTS candidates (
 CREATE TABLE IF NOT EXISTS notifications (
   id TEXT PRIMARY KEY, audience TEXT, data TEXT NOT NULL, created_at TEXT
 );`
-	_, err := s.db.Exec(schema)
+	// Ambos motores aceptan ejecutar varias sentencias separadas por ';' una a una.
+	for _, stmt := range strings.Split(schema, ";") {
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" {
+			continue
+		}
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("migración (%.40s...): %w", stmt, err)
+		}
+	}
+	return nil
+}
+
+// rebind convierte los placeholders '?' a '$1, $2...' cuando usamos Postgres.
+func (s *Store) rebind(query string) string {
+	if !s.postgres {
+		return query
+	}
+	var b strings.Builder
+	n := 0
+	for _, r := range query {
+		if r == '?' {
+			n++
+			b.WriteString("$")
+			b.WriteString(fmt.Sprint(n))
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func (s *Store) exec(query string, args ...any) error {
+	_, err := s.db.Exec(s.rebind(query), args...)
 	return err
+}
+
+func (s *Store) query(query string, args ...any) (*sql.Rows, error) {
+	return s.db.Query(s.rebind(query), args...)
+}
+
+func (s *Store) queryRow(query string, args ...any) *sql.Row {
+	return s.db.QueryRow(s.rebind(query), args...)
 }
 
 func marshal(v any) string { b, _ := json.Marshal(v); return string(b) }
 
 // ---------------- Workers ----------------
+
+const upsertWorker = `INSERT INTO workers (id,data,ciudad,oficio,disponibilidad,estado,updated_at)
+VALUES (?,?,?,?,?,?,?)
+ON CONFLICT (id) DO UPDATE SET
+  data=excluded.data, ciudad=excluded.ciudad, oficio=excluded.oficio,
+  disponibilidad=excluded.disponibilidad, estado=excluded.estado, updated_at=excluded.updated_at`
 
 func (s *Store) CreateWorker(w *models.Worker) error {
 	if w.ID == "" {
@@ -74,15 +150,10 @@ func (s *Store) CreateWorker(w *models.Worker) error {
 	if w.Estado == "" {
 		w.Estado = w.Disponibilidad
 	}
-	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO workers (id,data,ciudad,oficio,disponibilidad,estado,updated_at)
-		 VALUES (?,?,?,?,?,?,?)`,
-		w.ID, marshal(w), w.Ciudad, w.OficioPrincipal, w.Disponibilidad, w.Estado,
-		w.UpdatedAt.Format(time.RFC3339))
-	return err
+	return s.exec(upsertWorker, w.ID, marshal(w), w.Ciudad, w.OficioPrincipal,
+		w.Disponibilidad, w.Estado, w.UpdatedAt.Format(time.RFC3339))
 }
 
-// ListWorkers permite filtrar por ciudad, oficio y disponibilidad (panel admin).
 func (s *Store) ListWorkers(ciudad, oficio, disponibilidad string) ([]models.Worker, error) {
 	q := `SELECT data FROM workers WHERE 1=1`
 	var args []any
@@ -99,11 +170,11 @@ func (s *Store) ListWorkers(ciudad, oficio, disponibilidad string) ([]models.Wor
 		args = append(args, disponibilidad)
 	}
 	q += ` ORDER BY updated_at DESC`
-	return queryWorkers(s.db, q, args...)
+	return s.scanWorkers(q, args...)
 }
 
 func (s *Store) GetWorker(id string) (*models.Worker, error) {
-	ws, err := queryWorkers(s.db, `SELECT data FROM workers WHERE id=?`, id)
+	ws, err := s.scanWorkers(`SELECT data FROM workers WHERE id=?`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -128,8 +199,8 @@ func (s *Store) UpdateWorkerStatus(id, estado string) (*models.Worker, error) {
 	return w, nil
 }
 
-func queryWorkers(db *sql.DB, q string, args ...any) ([]models.Worker, error) {
-	rows, err := db.Query(q, args...)
+func (s *Store) scanWorkers(q string, args ...any) ([]models.Worker, error) {
+	rows, err := s.query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -151,6 +222,9 @@ func queryWorkers(db *sql.DB, q string, args ...any) ([]models.Worker, error) {
 
 // ---------------- Companies ----------------
 
+const upsertCompany = `INSERT INTO companies (id,data,updated_at) VALUES (?,?,?)
+ON CONFLICT (id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at`
+
 func (s *Store) CreateCompany(c *models.Company) error {
 	if c.ID == "" {
 		c.ID = uuid.NewString()
@@ -160,16 +234,12 @@ func (s *Store) CreateCompany(c *models.Company) error {
 		c.CreatedAt = now
 	}
 	c.UpdatedAt = now
-	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO companies (id,data,updated_at) VALUES (?,?,?)`,
-		c.ID, marshal(c), c.UpdatedAt.Format(time.RFC3339))
-	return err
+	return s.exec(upsertCompany, c.ID, marshal(c), c.UpdatedAt.Format(time.RFC3339))
 }
 
 func (s *Store) GetCompany(id string) (*models.Company, error) {
-	row := s.db.QueryRow(`SELECT data FROM companies WHERE id=?`, id)
 	var data string
-	if err := row.Scan(&data); err != nil {
+	if err := s.queryRow(`SELECT data FROM companies WHERE id=?`, id).Scan(&data); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -180,7 +250,7 @@ func (s *Store) GetCompany(id string) (*models.Company, error) {
 }
 
 func (s *Store) ListCompanies() ([]models.Company, error) {
-	rows, err := s.db.Query(`SELECT data FROM companies ORDER BY updated_at DESC`)
+	rows, err := s.query(`SELECT data FROM companies ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -202,6 +272,9 @@ func (s *Store) ListCompanies() ([]models.Company, error) {
 
 // ---------------- Requests ----------------
 
+const upsertRequest = `INSERT INTO requests (id,data,estado,updated_at) VALUES (?,?,?,?)
+ON CONFLICT (id) DO UPDATE SET data=excluded.data, estado=excluded.estado, updated_at=excluded.updated_at`
+
 func (s *Store) CreateRequest(r *models.Request) error {
 	if r.ID == "" {
 		r.ID = uuid.NewString()
@@ -214,10 +287,7 @@ func (s *Store) CreateRequest(r *models.Request) error {
 	if r.Estado == "" {
 		r.Estado = models.RequestNueva
 	}
-	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO requests (id,data,estado,updated_at) VALUES (?,?,?,?)`,
-		r.ID, marshal(r), r.Estado, r.UpdatedAt.Format(time.RFC3339))
-	return err
+	return s.exec(upsertRequest, r.ID, marshal(r), r.Estado, r.UpdatedAt.Format(time.RFC3339))
 }
 
 func (s *Store) ListRequests(estado string) ([]models.Request, error) {
@@ -228,7 +298,7 @@ func (s *Store) ListRequests(estado string) ([]models.Request, error) {
 		args = append(args, estado)
 	}
 	q += ` ORDER BY updated_at DESC`
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -249,9 +319,8 @@ func (s *Store) ListRequests(estado string) ([]models.Request, error) {
 }
 
 func (s *Store) GetRequest(id string) (*models.Request, error) {
-	row := s.db.QueryRow(`SELECT data FROM requests WHERE id=?`, id)
 	var data string
-	if err := row.Scan(&data); err != nil {
+	if err := s.queryRow(`SELECT data FROM requests WHERE id=?`, id).Scan(&data); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -275,6 +344,10 @@ func (s *Store) UpdateRequestStatus(id, estado string) (*models.Request, error) 
 
 // ---------------- Candidates ----------------
 
+const upsertCandidate = `INSERT INTO candidates (id,request_id,worker_id,data,updated_at) VALUES (?,?,?,?,?)
+ON CONFLICT (id) DO UPDATE SET request_id=excluded.request_id, worker_id=excluded.worker_id,
+  data=excluded.data, updated_at=excluded.updated_at`
+
 func (s *Store) AddCandidate(c *models.Candidate) error {
 	if c.ID == "" {
 		c.ID = uuid.NewString()
@@ -285,14 +358,12 @@ func (s *Store) AddCandidate(c *models.Candidate) error {
 	if c.Estado == "" {
 		c.Estado = "pendiente"
 	}
-	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO candidates (id,request_id,worker_id,data,updated_at) VALUES (?,?,?,?,?)`,
-		c.ID, c.RequestID, c.WorkerID, marshal(c), c.CreatedAt.Format(time.RFC3339))
-	return err
+	return s.exec(upsertCandidate, c.ID, c.RequestID, c.WorkerID, marshal(c),
+		c.CreatedAt.Format(time.RFC3339))
 }
 
 func (s *Store) ListCandidates(requestID string) ([]models.Candidate, error) {
-	rows, err := s.db.Query(`SELECT data FROM candidates WHERE request_id=? ORDER BY updated_at`, requestID)
+	rows, err := s.query(`SELECT data FROM candidates WHERE request_id=? ORDER BY updated_at`, requestID)
 	if err != nil {
 		return nil, err
 	}
@@ -312,9 +383,7 @@ func (s *Store) ListCandidates(requestID string) ([]models.Candidate, error) {
 	return out, rows.Err()
 }
 
-// PublicCandidates devuelve la lista que VE la empresa: solo campos permitidos
-// (nombre, ciudad, oficio, experiencia, certificaciones, estado). Sin datos
-// privados (teléfono, correo, dirección).
+// PublicCandidates devuelve la lista que VE la empresa: solo campos permitidos.
 func (s *Store) PublicCandidates(requestID string) ([]models.CandidatePublic, error) {
 	cands, err := s.ListCandidates(requestID)
 	if err != nil {
@@ -342,6 +411,9 @@ func (s *Store) PublicCandidates(requestID string) ([]models.CandidatePublic, er
 
 // ---------------- Notifications ----------------
 
+const upsertNotification = `INSERT INTO notifications (id,audience,data,created_at) VALUES (?,?,?,?)
+ON CONFLICT (id) DO UPDATE SET audience=excluded.audience, data=excluded.data, created_at=excluded.created_at`
+
 func (s *Store) CreateNotification(n *models.Notification) error {
 	if n.ID == "" {
 		n.ID = uuid.NewString()
@@ -349,16 +421,12 @@ func (s *Store) CreateNotification(n *models.Notification) error {
 	if n.CreatedAt.IsZero() {
 		n.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO notifications (id,audience,data,created_at) VALUES (?,?,?,?)`,
-		n.ID, n.Audience, marshal(n), n.CreatedAt.Format(time.RFC3339))
-	return err
+	return s.exec(upsertNotification, n.ID, n.Audience, marshal(n),
+		n.CreatedAt.Format(time.RFC3339))
 }
 
-// ListNotifications devuelve notificaciones para una audiencia concreta más las
-// dirigidas a "all".
 func (s *Store) ListNotifications(audience string) ([]models.Notification, error) {
-	rows, err := s.db.Query(
+	rows, err := s.query(
 		`SELECT data FROM notifications WHERE audience=? OR audience='all' ORDER BY created_at DESC`,
 		audience)
 	if err != nil {

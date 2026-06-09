@@ -43,6 +43,7 @@ type Worker struct {
 	Licencias         []string  `json:"licencias"`
 	Disponibilidad    string    `json:"disponibilidad"` // disponible / no_disponible
 	FotoURL           string    `json:"fotoUrl,omitempty"`
+	CertificadosArchivos []string `json:"certificadosArchivos,omitempty"` // URLs de certificados subidos
 	Estado            string    `json:"estado"` // estado operativo (invitado/confirmado/...)
 	CreatedAt         time.Time `json:"createdAt"`
 	UpdatedAt         time.Time `json:"updatedAt"`

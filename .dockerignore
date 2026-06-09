@@ -1,0 +1,7 @@
+*.db
+*.db-shm
+*.db-wal
+uploads/
+.env
+.git
+README.md
