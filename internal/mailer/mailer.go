@@ -74,11 +74,40 @@ func (m *Mailer) sendViaSendGrid(to, subject, body string) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		msg, _ := io.ReadAll(resp.Body)
-		log.Printf("[mail:error] sendgrid status=%d body=%s", resp.StatusCode, string(msg))
-		return fmt.Errorf("sendgrid status %d", resp.StatusCode)
+		body := strings.TrimSpace(string(msg))
+		log.Printf("[mail:error] sendgrid status=%d body=%s", resp.StatusCode, body)
+		return fmt.Errorf("SendGrid respondió %d: %s", resp.StatusCode, body)
 	}
 	log.Printf("[mail:ok] (sendgrid) para=%q asunto=%q", to, subject)
 	return nil
+}
+
+// Provider indica qué proveedor de correo está activo.
+func (m *Mailer) Provider() string {
+	switch {
+	case m.cfg.SendGridKey != "":
+		return "sendgrid"
+	case m.cfg.SMTPHost != "":
+		return "smtp"
+	default:
+		return "none"
+	}
+}
+
+// FromAddress es el remitente configurado (debe estar verificado en SendGrid).
+func (m *Mailer) FromAddress() string { return fromAddress(m.cfg.MailFrom) }
+
+// SendTest envía un correo de prueba y devuelve (ok, detalle) para diagnóstico.
+func (m *Mailer) SendTest(to string) (bool, string) {
+	if m.Provider() == "none" {
+		return false, "Sin proveedor de correo configurado (define SENDGRID_API_KEY o SMTP_*)."
+	}
+	err := m.Send(to, "neXus · Prueba de correo",
+		"Este es un correo de prueba de neXus. Si lo recibes, el envío funciona correctamente.")
+	if err != nil {
+		return false, err.Error()
+	}
+	return true, fmt.Sprintf("Aceptado: enviado a %s desde %q vía %s.", to, m.FromAddress(), m.Provider())
 }
 
 // sendViaSMTP envía por SMTP (alternativa).

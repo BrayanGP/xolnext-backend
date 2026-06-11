@@ -68,6 +68,14 @@ func Open(databaseURL, sqlitePath string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+// Engine devuelve el motor de base de datos en uso.
+func (s *Store) Engine() string {
+	if s.postgres {
+		return "Postgres"
+	}
+	return "SQLite"
+}
+
 func (s *Store) migrate() error {
 	const schema = `
 CREATE TABLE IF NOT EXISTS workers (

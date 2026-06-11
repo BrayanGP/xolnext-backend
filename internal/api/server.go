@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/BrayanGP/nexus-backend/internal/config"
 	"github.com/BrayanGP/nexus-backend/internal/mailer"
 	"github.com/BrayanGP/nexus-backend/internal/models"
 	"github.com/BrayanGP/nexus-backend/internal/notify"
@@ -23,11 +24,12 @@ type Server struct {
 	hub     *notify.Hub
 	storage storage.Storage
 	mailer  *mailer.Mailer
+	cfg     config.Config
 	secret  string
 }
 
-func New(st *store.Store, hub *notify.Hub, fs storage.Storage, m *mailer.Mailer, secret string) *Server {
-	return &Server{store: st, hub: hub, storage: fs, mailer: m, secret: secret}
+func New(st *store.Store, hub *notify.Hub, fs storage.Storage, m *mailer.Mailer, cfg config.Config) *Server {
+	return &Server{store: st, hub: hub, storage: fs, mailer: m, cfg: cfg, secret: cfg.JWTSecret}
 }
 
 // Routes construye el http.Handler con todas las rutas y el middleware CORS.
@@ -45,6 +47,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/auth/me", s.withAuth(s.me))
 
 	admin := models.RoleAdmin
+
+	// Diagnóstico (solo admin)
+	mux.HandleFunc("GET /api/admin/diagnostics", s.requireRole(admin, s.diagnostics))
+	mux.HandleFunc("POST /api/admin/mail-test", s.requireRole(admin, s.mailTest))
 
 	// Trabajadores
 	mux.HandleFunc("GET /api/workers", s.requireRole(admin, s.listWorkers)) // directorio: solo admin
@@ -136,6 +142,36 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) legal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"disclaimer": models.DisclaimerLegal})
+}
+
+// diagnostics expone configuración no sensible para diagnosticar el entorno.
+func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"dbEngine":          s.store.Engine(),
+		"emailProvider":     s.mailer.Provider(),
+		"mailFrom":          s.mailer.FromAddress(),
+		"sendgridConfigured": s.cfg.SendGridKey != "",
+		"storageBackend":    s.cfg.StorageBackend,
+		"publicBaseURL":     s.cfg.PublicBaseURL,
+	})
+}
+
+// mailTest envía un correo de prueba síncrono y devuelve el resultado exacto.
+func (s *Server) mailTest(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		To string `json:"to"`
+	}
+	if err := decode(r, &body); err != nil || body.To == "" {
+		writeErr(w, http.StatusBadRequest, "campo 'to' requerido")
+		return
+	}
+	ok, detail := s.mailer.SendTest(body.To)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       ok,
+		"detail":   detail,
+		"provider": s.mailer.Provider(),
+		"from":     s.mailer.FromAddress(),
+	})
 }
 
 // updateWorker actualiza el perfil de un trabajador. Solo el dueño o un admin.

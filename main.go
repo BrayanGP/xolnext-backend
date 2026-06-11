@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/BrayanGP/nexus-backend/internal/api"
@@ -51,9 +52,15 @@ func main() {
 
 	seed(st)
 
+	// Advertencia si el correo está activo pero el remitente parece no verificado.
+	if cfg.SendGridKey != "" && (cfg.MailFrom == "" || containsAny(cfg.MailFrom, "nexus.app", "no-reply@nexus")) {
+		log.Printf("ADVERTENCIA: MAIL_FROM=%q parece no verificado en SendGrid. "+
+			"Usa un remitente verificado (ej. tu correo) o SendGrid devolverá 403.", cfg.MailFrom)
+	}
+
 	hub := notify.NewHub()
 	mail := mailer.New(cfg)
-	srv := api.New(st, hub, fs, mail, cfg.JWTSecret)
+	srv := api.New(st, hub, fs, mail, cfg)
 
 	httpSrv := &http.Server{
 		Addr:         cfg.Addr,
@@ -71,6 +78,15 @@ func main() {
 	if err := httpSrv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func randomSecret() string {
