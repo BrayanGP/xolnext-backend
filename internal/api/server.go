@@ -38,6 +38,7 @@ func (s *Server) Routes() http.Handler {
 
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/legal", s.legal)
+	mux.HandleFunc("GET /api/public/stats", s.publicStats) // exploración sin login
 
 	// Autenticación (públicas)
 	mux.HandleFunc("POST /api/auth/register", s.register)
@@ -154,6 +155,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) legal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"disclaimer": models.DisclaimerLegal})
+}
+
+// publicStats devuelve estadísticas agregadas (sin datos personales) para la
+// pantalla de exploración pública.
+func (s *Server) publicStats(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.PublicStats())
 }
 
 // diagnostics expone configuración no sensible para diagnosticar el entorno.

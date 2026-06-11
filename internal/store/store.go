@@ -251,6 +251,39 @@ func (s *Store) scanWorkers(q string, args ...any) ([]models.Worker, error) {
 	return out, rows.Err()
 }
 
+// PublicStats devuelve agregados NO sensibles para la pantalla de exploración
+// (totales y conteos por oficio/ciudad). Nunca incluye datos personales.
+func (s *Store) PublicStats() map[string]any {
+	count := func(q string, args ...any) int {
+		var n int
+		_ = s.queryRow(q, args...).Scan(&n)
+		return n
+	}
+	group := func(q string) []map[string]any {
+		rows, err := s.query(q)
+		if err != nil {
+			return []map[string]any{}
+		}
+		defer rows.Close()
+		out := []map[string]any{}
+		for rows.Next() {
+			var label string
+			var c int
+			if rows.Scan(&label, &c) == nil {
+				out = append(out, map[string]any{"label": label, "count": c})
+			}
+		}
+		return out
+	}
+	return map[string]any{
+		"trabajadores": count(`SELECT COUNT(*) FROM workers`),
+		"empresas":     count(`SELECT COUNT(*) FROM companies`),
+		"disponibles":  count(`SELECT COUNT(*) FROM workers WHERE disponibilidad=?`, models.WorkerDisponible),
+		"oficios":      group(`SELECT oficio, COUNT(*) c FROM workers WHERE oficio<>'' GROUP BY oficio ORDER BY c DESC LIMIT 8`),
+		"ciudades":     group(`SELECT ciudad, COUNT(*) c FROM workers WHERE ciudad<>'' GROUP BY ciudad ORDER BY c DESC LIMIT 6`),
+	}
+}
+
 // ---------------- Companies ----------------
 
 const upsertCompany = `INSERT INTO companies (id,data,updated_at) VALUES (?,?,?)
