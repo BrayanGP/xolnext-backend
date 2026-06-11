@@ -214,13 +214,13 @@ func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "la contraseña debe tener al menos 6 caracteres")
 		return
 	}
-	code, expires, err := s.store.GetReset(req.Email)
-	if err != nil || code != strings.TrimSpace(req.Code) {
-		writeErr(w, http.StatusBadRequest, "código inválido")
+	valid, err := s.store.VerifyReset(req.Email, req.Code)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if time.Now().After(expires) {
-		writeErr(w, http.StatusBadRequest, "el código expiró, solicita uno nuevo")
+	if !valid {
+		writeErr(w, http.StatusBadRequest, "código inválido o expirado")
 		return
 	}
 	user, err := s.store.GetUserByEmail(req.Email)

@@ -201,9 +201,16 @@ func (s *Server) updateWorker(w http.ResponseWriter, r *http.Request) {
 	if wk.Disponibilidad == "" {
 		wk.Disponibilidad = models.WorkerDisponible
 	}
-	// Un no-admin no puede asignarse estados operativos (confirmado/asignado…).
+	// El estado operativo (invitado/confirmado/asignado) lo gestiona el admin.
+	// Una edición de perfil del trabajador no debe resetearlo: solo refleja la
+	// disponibilidad cuando el estado actual NO es operativo.
 	if !u.IsAdmin() {
-		wk.Estado = wk.Disponibilidad
+		switch existing.Estado {
+		case models.WorkerInvitado, models.WorkerConfirmado, models.WorkerAsignado:
+			wk.Estado = existing.Estado
+		default:
+			wk.Estado = wk.Disponibilidad
+		}
 	}
 	if err := s.store.CreateWorker(&wk); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())

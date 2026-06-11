@@ -66,6 +66,14 @@ func Load() Config {
 	}
 	// El remitente: MAIL_FROM si existe, si no SMTP_FROM.
 	c.MailFrom = env("MAIL_FROM", c.SMTPFrom)
+
+	// Robustez: si configuraron SendGrid por SMTP (smtp.sendgrid.net, user
+	// "apikey", pass = API key) pero NO definieron SENDGRID_API_KEY, usamos esa
+	// misma key con la Web API (HTTPS), porque Railway bloquea los puertos SMTP.
+	if c.SendGridKey == "" && strings.Contains(strings.ToLower(c.SMTPHost), "sendgrid") &&
+		strings.HasPrefix(c.SMTPPass, "SG.") {
+		c.SendGridKey = c.SMTPPass
+	}
 	return c
 }
 

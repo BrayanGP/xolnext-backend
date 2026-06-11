@@ -10,7 +10,9 @@
 package store
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -302,7 +304,7 @@ func (s *Store) CreateRequest(r *models.Request) error {
 		r.ID = uuid.NewString()
 	}
 	if r.Folio == "" {
-		r.Folio = generateFolio()
+		r.Folio = s.uniqueFolio()
 	}
 	now := time.Now().UTC()
 	if r.CreatedAt.IsZero() {
@@ -313,6 +315,19 @@ func (s *Store) CreateRequest(r *models.Request) error {
 		r.Estado = models.RequestNueva
 	}
 	return s.exec(upsertRequest, r.ID, marshal(r), r.Estado, r.UpdatedAt.Format(time.RFC3339))
+}
+
+// uniqueFolio genera un folio garantizando que no exista ya.
+func (s *Store) uniqueFolio() string {
+	for i := 0; i < 10; i++ {
+		f := generateFolio()
+		var n int
+		if err := s.queryRow(`SELECT COUNT(*) FROM requests WHERE data LIKE ?`,
+			`%"`+f+`"%`).Scan(&n); err != nil || n == 0 {
+			return f
+		}
+	}
+	return generateFolio()
 }
 
 // generateFolio crea un folio legible tipo "NX-7K2P9Q".
@@ -596,22 +611,31 @@ func (s *Store) UpdateUserPassword(id, hash string) error {
 const upsertReset = `INSERT INTO password_resets (email,code,expires_at) VALUES (?,?,?)
 ON CONFLICT (email) DO UPDATE SET code=excluded.code, expires_at=excluded.expires_at`
 
-func (s *Store) SetReset(email, code string, expires time.Time) error {
-	return s.exec(upsertReset, normalizeEmail(email), code, expires.Format(time.RFC3339))
+// hashCode guarda solo el hash del código (no texto plano).
+func hashCode(code string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(code)))
+	return hex.EncodeToString(sum[:])
 }
 
-// GetReset devuelve el código y su expiración para un correo.
-func (s *Store) GetReset(email string) (code string, expires time.Time, err error) {
-	var exp string
+func (s *Store) SetReset(email, code string, expires time.Time) error {
+	return s.exec(upsertReset, normalizeEmail(email), hashCode(code), expires.Format(time.RFC3339))
+}
+
+// VerifyReset valida el código contra el hash guardado y su expiración.
+func (s *Store) VerifyReset(email, code string) (bool, error) {
+	var stored, exp string
 	row := s.queryRow(`SELECT code, expires_at FROM password_resets WHERE email=?`, normalizeEmail(email))
-	if err = row.Scan(&code, &exp); err != nil {
+	if err := row.Scan(&stored, &exp); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", time.Time{}, ErrNotFound
+			return false, nil
 		}
-		return "", time.Time{}, err
+		return false, err
 	}
-	expires, _ = time.Parse(time.RFC3339, exp)
-	return code, expires, nil
+	expires, _ := time.Parse(time.RFC3339, exp)
+	if time.Now().After(expires) {
+		return false, nil
+	}
+	return stored == hashCode(code), nil
 }
 
 func (s *Store) DeleteReset(email string) error {
