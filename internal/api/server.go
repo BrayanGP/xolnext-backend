@@ -82,6 +82,18 @@ func (s *Server) Routes() http.Handler {
 	// Oportunidades del trabajador (solicitudes donde es candidato)
 	mux.HandleFunc("GET /api/me/opportunities", s.requireRole(models.RoleWorker, s.myOpportunities))
 
+	// Reputación / calificaciones
+	mux.HandleFunc("POST /api/ratings", s.withAuth(s.addRating))
+	mux.HandleFunc("GET /api/workers/{id}/rating", s.withAuth(s.workerRating))
+	mux.HandleFunc("GET /api/companies/{id}/rating", s.withAuth(s.companyRating))
+
+	// Control de horas
+	mux.HandleFunc("POST /api/requests/{id}/hours", s.withAuth(s.addHours))
+	mux.HandleFunc("GET /api/requests/{id}/hours", s.withAuth(s.listHours))
+
+	// Plan / suscripción de la empresa
+	mux.HandleFunc("GET /api/me/plan", s.requireRole(models.RoleCompany, s.myPlan))
+
 	// Notificaciones directas (la audiencia se deriva del token)
 	mux.HandleFunc("POST /api/notifications", s.requireRole(admin, s.createNotification))
 	mux.HandleFunc("GET /api/notifications", s.withAuth(s.listNotifications))
@@ -334,6 +346,21 @@ func (s *Server) createRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	// La solicitud pertenece a la empresa autenticada (no se confía en el body).
 	rq.CompanyID = s.currentUser(r).CompanyID
+
+	// Gating por plan: límite de solicitudes activas.
+	plan := models.PlanFree
+	if co, err := s.store.GetCompany(rq.CompanyID); err == nil && co.Plan != "" {
+		plan = co.Plan
+	}
+	if limit := models.PlanLimit(plan); limit > 0 && s.activeRequests(rq.CompanyID) >= limit {
+		writeJSON(w, http.StatusPaymentRequired, map[string]any{
+			"error": fmt.Sprintf("Alcanzaste el límite de %d solicitudes activas del plan %s. "+
+				"Cierra alguna o sube de plan.", limit, plan),
+			"plan": plan, "limit": limit,
+		})
+		return
+	}
+
 	rq.Estado = models.RequestNueva
 	if err := s.store.CreateRequest(&rq); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -500,6 +527,8 @@ func (s *Server) publicCandidates(w http.ResponseWriter, r *http.Request) {
 func (s *Server) myOpportunities(w http.ResponseWriter, r *http.Request) {
 	u := s.currentUser(r)
 	type opportunity struct {
+		RequestID      string `json:"requestId"`
+		CompanyID      string `json:"companyId"`
 		Folio          string `json:"folio"`
 		TipoTrabajador string `json:"tipoTrabajador"`
 		CiudadZona     string `json:"ciudadZona"`
@@ -775,6 +804,123 @@ func (s *Server) candidatesPDF(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="candidatos-%s.pdf"`, id))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(pdf)
+}
+
+// ---------------- reputación / calificaciones ----------------
+
+func (s *Server) addRating(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	var body struct {
+		RequestID  string `json:"requestId"`
+		TargetType string `json:"targetType"`
+		TargetID   string `json:"targetId"`
+		Stars      int    `json:"stars"`
+		Comentario string `json:"comentario"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "JSON inválido")
+		return
+	}
+	if body.Stars < 1 || body.Stars > 5 {
+		writeErr(w, http.StatusBadRequest, "stars debe ser de 1 a 5")
+		return
+	}
+	if (body.TargetType != "worker" && body.TargetType != "company") || body.TargetID == "" {
+		writeErr(w, http.StatusBadRequest, "targetType/targetId inválidos")
+		return
+	}
+	rating := &models.Rating{
+		RequestID: body.RequestID, RaterUserID: u.ID, RaterRole: u.Role,
+		TargetType: body.TargetType, TargetID: body.TargetID,
+		Stars: body.Stars, Comentario: body.Comentario,
+	}
+	if err := s.store.AddRating(rating); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, rating)
+}
+
+func (s *Server) workerRating(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.RatingSummary(r.PathValue("id")))
+}
+
+func (s *Server) companyRating(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.RatingSummary(r.PathValue("id")))
+}
+
+// ---------------- control de horas ----------------
+
+func (s *Server) addHours(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.canAccessRequest(r, id) {
+		writeErr(w, http.StatusForbidden, "no autorizado")
+		return
+	}
+	var body struct {
+		WorkerID string  `json:"workerId"`
+		Horas    float64 `json:"horas"`
+		Nota     string  `json:"nota"`
+	}
+	if err := decode(r, &body); err != nil || body.WorkerID == "" || body.Horas <= 0 {
+		writeErr(w, http.StatusBadRequest, "workerId y horas (>0) son obligatorios")
+		return
+	}
+	if err := s.store.AddWorkHours(id, body.WorkerID, body.Horas, body.Nota); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.recordHistory(id, fmt.Sprintf("Registró %.1f h de trabajo", body.Horas), s.actorLabel(r))
+	writeJSON(w, http.StatusCreated, map[string]any{"ok": true})
+}
+
+func (s *Server) listHours(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.canAccessRequest(r, id) {
+		writeErr(w, http.StatusForbidden, "no autorizado")
+		return
+	}
+	entries, total, err := s.store.WorkHours(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entradas": entries, "total": total})
+}
+
+// ---------------- plan / suscripción ----------------
+
+func isOpenRequest(estado string) bool {
+	switch estado {
+	case models.RequestNueva, models.RequestEnRevision, models.RequestEnProceso,
+		models.RequestCandidatosEnvia, models.RequestPausada:
+		return true
+	}
+	return false
+}
+
+func (s *Server) activeRequests(companyID string) int {
+	reqs, _ := s.store.ListRequests("")
+	n := 0
+	for _, rq := range reqs {
+		if rq.CompanyID == companyID && isOpenRequest(rq.Estado) {
+			n++
+		}
+	}
+	return n
+}
+
+func (s *Server) myPlan(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	plan := models.PlanFree
+	if co, err := s.store.GetCompany(u.CompanyID); err == nil && co.Plan != "" {
+		plan = co.Plan
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"plan":           plan,
+		"limit":          models.PlanLimit(plan),
+		"activeRequests": s.activeRequests(u.CompanyID),
+	})
 }
 
 // ---------------- utilidades internas ----------------

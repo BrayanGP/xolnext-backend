@@ -106,6 +106,13 @@ CREATE TABLE IF NOT EXISTS password_resets (
 );
 CREATE TABLE IF NOT EXISTS history (
   id TEXT PRIMARY KEY, request_id TEXT, data TEXT NOT NULL, created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS ratings (
+  id TEXT PRIMARY KEY, request_id TEXT, rater_user_id TEXT, target_type TEXT,
+  target_id TEXT, stars INTEGER, data TEXT NOT NULL, created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS work_hours (
+  id TEXT PRIMARY KEY, request_id TEXT, worker_id TEXT, horas REAL, data TEXT NOT NULL, created_at TEXT
 );`
 	// Ambos motores aceptan ejecutar varias sentencias separadas por ';' una a una.
 	for _, stmt := range strings.Split(schema, ";") {
@@ -494,6 +501,7 @@ func (s *Store) PublicCandidates(requestID string) ([]models.CandidatePublic, er
 		if err != nil {
 			continue
 		}
+		rs := s.RatingSummary(w.ID)
 		out = append(out, models.CandidatePublic{
 			CandidateID:     c.ID,
 			WorkerID:        w.ID,
@@ -504,6 +512,8 @@ func (s *Store) PublicCandidates(requestID string) ([]models.CandidatePublic, er
 			Certificaciones: w.Certificaciones,
 			Estado:          c.Estado,
 			Comentario:      c.Comentario,
+			Rating:          rs.Average,
+			RatingCount:     rs.Count,
 		})
 	}
 	return out, nil
@@ -640,6 +650,84 @@ func (s *Store) VerifyReset(email, code string) (bool, error) {
 
 func (s *Store) DeleteReset(email string) error {
 	return s.exec(`DELETE FROM password_resets WHERE email=?`, normalizeEmail(email))
+}
+
+// ---------------- Ratings ----------------
+
+const upsertRating = `INSERT INTO ratings (id,request_id,rater_user_id,target_type,target_id,stars,data,created_at)
+VALUES (?,?,?,?,?,?,?,?)
+ON CONFLICT (id) DO UPDATE SET stars=excluded.stars, data=excluded.data`
+
+// AddRating registra (o actualiza) una calificación. Una por (rater,target,solicitud).
+func (s *Store) AddRating(r *models.Rating) error {
+	// Reusar id existente si ya calificó a ese objetivo en esa solicitud.
+	var existingID string
+	_ = s.queryRow(
+		`SELECT id FROM ratings WHERE rater_user_id=? AND target_id=? AND request_id=?`,
+		r.RaterUserID, r.TargetID, r.RequestID).Scan(&existingID)
+	if existingID != "" {
+		r.ID = existingID
+	} else if r.ID == "" {
+		r.ID = uuid.NewString()
+	}
+	if r.CreatedAt.IsZero() {
+		r.CreatedAt = time.Now().UTC()
+	}
+	return s.exec(upsertRating, r.ID, r.RequestID, r.RaterUserID, r.TargetType,
+		r.TargetID, r.Stars, marshal(r), r.CreatedAt.Format(time.RFC3339))
+}
+
+// RatingSummary devuelve el promedio y conteo de calificaciones de un objetivo.
+func (s *Store) RatingSummary(targetID string) models.RatingSummary {
+	var avg sql.NullFloat64
+	var count int
+	_ = s.queryRow(
+		`SELECT AVG(stars), COUNT(*) FROM ratings WHERE target_id=?`, targetID).Scan(&avg, &count)
+	out := models.RatingSummary{Count: count}
+	if avg.Valid {
+		out.Average = float64(int(avg.Float64*10+0.5)) / 10 // 1 decimal
+	}
+	return out
+}
+
+// ---------------- Horas trabajadas ----------------
+
+func (s *Store) AddWorkHours(requestID, workerID string, horas float64, nota string) error {
+	id := uuid.NewString()
+	data, _ := json.Marshal(map[string]any{
+		"id": id, "requestId": requestID, "workerId": workerID,
+		"horas": horas, "nota": nota, "createdAt": time.Now().UTC().Format(time.RFC3339),
+	})
+	return s.exec(
+		`INSERT INTO work_hours (id,request_id,worker_id,horas,data,created_at) VALUES (?,?,?,?,?,?)`,
+		id, requestID, workerID, horas, string(data), time.Now().UTC().Format(time.RFC3339))
+}
+
+// WorkHours devuelve las entradas de horas de una solicitud y el total.
+func (s *Store) WorkHours(requestID string) ([]map[string]any, float64, error) {
+	rows, err := s.query(
+		`SELECT data FROM work_hours WHERE request_id=? ORDER BY created_at DESC`, requestID)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	var total float64
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, 0, err
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(data), &m); err != nil {
+			return nil, 0, err
+		}
+		if h, ok := m["horas"].(float64); ok {
+			total += h
+		}
+		out = append(out, m)
+	}
+	return out, total, rows.Err()
 }
 
 // ---------------- Historial / auditoría ----------------

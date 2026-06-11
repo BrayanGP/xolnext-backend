@@ -78,8 +78,28 @@ type Company struct {
 	TipoIndustria    string    `json:"tipoIndustria"`
 	Descripcion      string    `json:"descripcion"`
 	MetodoPago       string    `json:"metodoPago,omitempty"`
+	Plan             string    `json:"plan"` // free | pro | business
 	CreatedAt        time.Time `json:"createdAt"`
 	UpdatedAt        time.Time `json:"updatedAt"`
+}
+
+// Planes de suscripción y su límite de solicitudes activas (0 = ilimitado).
+const (
+	PlanFree     = "free"
+	PlanPro      = "pro"
+	PlanBusiness = "business"
+)
+
+// PlanLimit devuelve el máximo de solicitudes activas por plan (0 = ilimitado).
+func PlanLimit(plan string) int {
+	switch plan {
+	case PlanPro:
+		return 20
+	case PlanBusiness:
+		return 0
+	default:
+		return 3 // free
+	}
 }
 
 // Request es una solicitud de personal creada por una empresa.
@@ -128,6 +148,8 @@ type CandidatePublic struct {
 	Certificaciones []string `json:"certificaciones"`
 	Estado          string   `json:"estado"`     // pendiente / aceptado / rechazado / realizado
 	Comentario      string   `json:"comentario"` // observaciones
+	Rating          float64  `json:"rating"`     // promedio de calificaciones del trabajador
+	RatingCount     int      `json:"ratingCount"`
 }
 
 // Notification es una notificación directa (push interno, NO WhatsApp API).
@@ -142,6 +164,25 @@ type Notification struct {
 	Folio     string    `json:"folio,omitempty"`
 	Leida     bool      `json:"leida"`
 	CreatedAt time.Time `json:"createdAt"`
+}
+
+// Rating es una calificación (1-5) que un usuario da a un trabajador o empresa.
+type Rating struct {
+	ID          string    `json:"id"`
+	RequestID   string    `json:"requestId"`
+	RaterUserID string    `json:"raterUserId"`
+	RaterRole   string    `json:"raterRole"`
+	TargetType  string    `json:"targetType"` // worker | company
+	TargetID    string    `json:"targetId"`
+	Stars       int       `json:"stars"` // 1..5
+	Comentario  string    `json:"comentario"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// RatingSummary es el promedio y conteo de calificaciones de un objetivo.
+type RatingSummary struct {
+	Average float64 `json:"average"`
+	Count   int     `json:"count"`
 }
 
 // HistoryEntry registra una acción sobre una solicitud (auditoría).
