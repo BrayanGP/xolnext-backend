@@ -3,8 +3,11 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/BrayanGP/nexus-backend/internal/auth"
 	"github.com/BrayanGP/nexus-backend/internal/models"
@@ -170,6 +173,72 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, user)
+}
+
+// forgotPassword genera un código de 6 dígitos y lo envía por correo.
+// Siempre responde 200 para no revelar si el correo existe.
+func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := decode(r, &req); err != nil || req.Email == "" {
+		writeErr(w, http.StatusBadRequest, "email requerido")
+		return
+	}
+	ok := map[string]string{"message": "Si el correo existe, te enviamos un código."}
+	user, err := s.store.GetUserByEmail(req.Email)
+	if err != nil {
+		writeJSON(w, http.StatusOK, ok) // no revelar inexistencia
+		return
+	}
+	code := fmt.Sprintf("%06d", rand.IntN(1000000))
+	_ = s.store.SetReset(user.Email, code, time.Now().Add(15*time.Minute))
+	go s.mailer.Send(user.Email, "neXus · Código de recuperación",
+		"Tu código para restablecer la contraseña es: "+code+
+			"\n\nVence en 15 minutos. Si no lo solicitaste, ignora este correo.\n\n— neXus")
+	writeJSON(w, http.StatusOK, ok)
+}
+
+// resetPassword valida el código y cambia la contraseña.
+func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email    string `json:"email"`
+		Code     string `json:"code"`
+		Password string `json:"password"`
+	}
+	if err := decode(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "datos inválidos")
+		return
+	}
+	if len(req.Password) < 6 {
+		writeErr(w, http.StatusBadRequest, "la contraseña debe tener al menos 6 caracteres")
+		return
+	}
+	code, expires, err := s.store.GetReset(req.Email)
+	if err != nil || code != strings.TrimSpace(req.Code) {
+		writeErr(w, http.StatusBadRequest, "código inválido")
+		return
+	}
+	if time.Now().After(expires) {
+		writeErr(w, http.StatusBadRequest, "el código expiró, solicita uno nuevo")
+		return
+	}
+	user, err := s.store.GetUserByEmail(req.Email)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "código inválido")
+		return
+	}
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.store.UpdateUserPassword(user.ID, hash); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.store.DeleteReset(req.Email)
+	writeJSON(w, http.StatusOK, map[string]string{"message": "Contraseña actualizada. Inicia sesión."})
 }
 
 func (s *Server) issueToken(w http.ResponseWriter, user *models.User, status int) {

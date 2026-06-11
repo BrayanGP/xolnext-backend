@@ -40,6 +40,8 @@ func (s *Server) Routes() http.Handler {
 	// Autenticación (públicas)
 	mux.HandleFunc("POST /api/auth/register", s.register)
 	mux.HandleFunc("POST /api/auth/login", s.login)
+	mux.HandleFunc("POST /api/auth/forgot", s.forgotPassword)
+	mux.HandleFunc("POST /api/auth/reset", s.resetPassword)
 	mux.HandleFunc("GET /api/auth/me", s.withAuth(s.me))
 
 	admin := models.RoleAdmin
@@ -67,7 +69,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/requests/{id}/candidates", s.requireRole(admin, s.addCandidate))
 	mux.HandleFunc("GET /api/requests/{id}/candidates", s.requireRole(admin, s.listCandidates))
 	mux.HandleFunc("GET /api/requests/{id}/candidates/public", s.withAuth(s.publicCandidates))
+	mux.HandleFunc("PATCH /api/requests/{id}/candidates/{cid}", s.withAuth(s.updateCandidate))
 	mux.HandleFunc("GET /api/requests/{id}/candidates.pdf", s.withAuth(s.candidatesPDF))
+	mux.HandleFunc("GET /api/requests/{id}/history", s.requireRole(admin, s.requestHistory))
+
+	// Oportunidades del trabajador (solicitudes donde es candidato)
+	mux.HandleFunc("GET /api/me/opportunities", s.requireRole(models.RoleWorker, s.myOpportunities))
 
 	// Notificaciones directas (la audiencia se deriva del token)
 	mux.HandleFunc("POST /api/notifications", s.requireRole(admin, s.createNotification))
@@ -342,7 +349,10 @@ func (s *Server) updateRequestStatus(w http.ResponseWriter, r *http.Request) {
 			s.handleStoreErr(w, err)
 			return
 		}
-		ownAction := body.Estado == models.RequestCancelada || body.Estado == models.RequestCerrada
+		ownAction := body.Estado == models.RequestCancelada ||
+			body.Estado == models.RequestCerrada ||
+			body.Estado == models.RequestPausada ||
+			body.Estado == models.RequestArchivada
 		if existing.CompanyID != u.CompanyID || !ownAction {
 			writeErr(w, http.StatusForbidden, "no autorizado para este cambio de estado")
 			return
@@ -353,10 +363,12 @@ func (s *Server) updateRequestStatus(w http.ResponseWriter, r *http.Request) {
 		s.handleStoreErr(w, err)
 		return
 	}
+	s.recordHistory(id, "Estado de la solicitud: "+body.Estado, s.actorLabel(r))
 	// Avisar a la empresa cuando hay candidatos enviados.
 	if body.Estado == models.RequestCandidatosEnvia && rq.CompanyID != "" {
-		s.hub.Broadcast(s.persistNotif("company:"+rq.CompanyID, "Candidatos enviados · "+rq.Folio,
-			"neXus te envió candidatos para tu solicitud "+rq.Folio+" ("+rq.TipoTrabajador+").", "candidatos"))
+		s.hub.Broadcast(s.persistNotifFull("company:"+rq.CompanyID, "Candidatos enviados · "+rq.Folio,
+			"neXus te envió candidatos para tu solicitud "+rq.Folio+" ("+rq.TipoTrabajador+").",
+			"candidatos", models.PrioImportante, rq.ID, rq.Folio))
 		if co, err := s.store.GetCompany(rq.CompanyID); err == nil {
 			go s.mailer.Send(co.Correo, "neXus · Candidatos enviados ("+rq.Folio+")",
 				"Hola "+co.PersonaContacto+",\n\nneXus preparó una lista de candidatos para tu solicitud "+
@@ -388,13 +400,17 @@ func (s *Server) addCandidate(w http.ResponseWriter, r *http.Request) {
 	if rq, err := s.store.GetRequest(requestID); err == nil {
 		folio = rq.Folio
 	}
-	s.hub.Broadcast(s.persistNotif("worker:"+c.WorkerID, "Nueva oportunidad",
-		"Fuiste incluido como candidato en la solicitud "+folio+".", "oportunidad"))
+	wkNombre := c.WorkerID
 	if wk, err := s.store.GetWorker(c.WorkerID); err == nil {
+		wkNombre = wk.NombreCompleto
 		go s.mailer.Send(wk.Correo, "neXus · Nueva oportunidad",
 			"Hola "+wk.NombreCompleto+",\n\nFuiste incluido como candidato en una solicitud de personal en neXus. "+
 				"Mantente disponible; el equipo de neXus dará seguimiento.\n\n— neXus")
 	}
+	s.hub.Broadcast(s.persistNotifFull("worker:"+c.WorkerID, "Nueva oportunidad",
+		"Fuiste incluido como candidato en la solicitud "+folio+".",
+		"oportunidad", models.PrioImportante, requestID, folio))
+	s.recordHistory(requestID, "Agregó candidato: "+wkNombre, s.actorLabel(r))
 	writeJSON(w, http.StatusCreated, c)
 }
 
@@ -430,6 +446,117 @@ func (s *Server) publicCandidates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, cs)
+}
+
+// myOpportunities devuelve las solicitudes donde el trabajador es candidato
+// (solo datos no sensibles de la solicitud + su estado como candidato).
+func (s *Server) myOpportunities(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	type opportunity struct {
+		Folio          string `json:"folio"`
+		TipoTrabajador string `json:"tipoTrabajador"`
+		CiudadZona     string `json:"ciudadZona"`
+		FechaInicio    string `json:"fechaInicio"`
+		RequestEstado  string `json:"requestEstado"`
+		MiEstado       string `json:"miEstado"`
+	}
+	out := []opportunity{}
+	if u.WorkerID == "" {
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	cands, err := s.store.CandidatesByWorker(u.WorkerID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, c := range cands {
+		rq, err := s.store.GetRequest(c.RequestID)
+		if err != nil {
+			continue
+		}
+		out = append(out, opportunity{
+			Folio: rq.Folio, TipoTrabajador: rq.TipoTrabajador,
+			CiudadZona: rq.CiudadZona, FechaInicio: rq.FechaInicio,
+			RequestEstado: rq.Estado, MiEstado: c.Estado,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// updateCandidate permite a admin o a la empresa dueña aceptar/rechazar y
+// comentar un candidato.
+func (s *Server) updateCandidate(w http.ResponseWriter, r *http.Request) {
+	requestID := r.PathValue("id")
+	cid := r.PathValue("cid")
+	if !s.canAccessRequest(r, requestID) {
+		writeErr(w, http.StatusForbidden, "no autorizado")
+		return
+	}
+	c, err := s.store.GetCandidate(cid)
+	if err != nil {
+		s.handleStoreErr(w, err)
+		return
+	}
+	if c.RequestID != requestID {
+		writeErr(w, http.StatusNotFound, "candidato no encontrado")
+		return
+	}
+	var body struct {
+		Estado     string `json:"estado"`
+		Comentario string `json:"comentario"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "JSON inválido")
+		return
+	}
+	if body.Estado != "" {
+		c.Estado = body.Estado
+	}
+	if body.Comentario != "" {
+		c.Comentario = body.Comentario
+	}
+	if err := s.store.AddCandidate(c); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	actor := s.actorLabel(r)
+	s.recordHistory(requestID, "Candidato marcado: "+c.Estado, actor)
+	// Avisar al trabajador si fue aceptado o rechazado.
+	if body.Estado == models.CandAceptado || body.Estado == models.CandRechazado {
+		folio := ""
+		if rq, err := s.store.GetRequest(requestID); err == nil {
+			folio = rq.Folio
+		}
+		prio := models.PrioImportante
+		s.hub.Broadcast(s.persistNotifFull("worker:"+c.WorkerID,
+			"Actualización de candidatura", "Tu candidatura en "+folio+" fue: "+c.Estado,
+			"estado", prio, requestID, folio))
+	}
+	writeJSON(w, http.StatusOK, c)
+}
+
+func (s *Server) requestHistory(w http.ResponseWriter, r *http.Request) {
+	h, err := s.store.ListHistory(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, h)
+}
+
+func (s *Server) actorLabel(r *http.Request) string {
+	u := s.currentUser(r)
+	if usr, err := s.store.GetUserByID(u.ID); err == nil {
+		return usr.Email
+	}
+	return u.Role
+}
+
+func (s *Server) recordHistory(requestID, accion, actor string) {
+	_ = s.store.AddHistory(&models.HistoryEntry{
+		RequestID: requestID, Accion: accion, Actor: actor,
+	})
 }
 
 func (s *Server) createNotification(w http.ResponseWriter, r *http.Request) {
@@ -596,6 +723,7 @@ func (s *Server) candidatesPDF(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.recordHistory(id, "Descargó el PDF de candidatos", s.actorLabel(r))
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="candidatos-%s.pdf"`, id))
 	w.WriteHeader(http.StatusOK)
@@ -612,11 +740,31 @@ func (s *Server) handleStoreErr(w http.ResponseWriter, err error) {
 	writeErr(w, http.StatusInternalServerError, err.Error())
 }
 
-// persistNotif guarda la notificación y la devuelve para difundirla.
+// persistNotif guarda una notificación simple (prioridad informativa).
 func (s *Server) persistNotif(audience, titulo, cuerpo, tipo string) models.Notification {
-	n := models.Notification{Audience: audience, Titulo: titulo, Cuerpo: cuerpo, Tipo: tipo}
+	return s.persistNotifFull(audience, titulo, cuerpo, tipo, defaultPriority(tipo), "", "")
+}
+
+// persistNotifFull guarda una notificación con prioridad y referencia a solicitud.
+func (s *Server) persistNotifFull(audience, titulo, cuerpo, tipo, prioridad, requestID, folio string) models.Notification {
+	n := models.Notification{
+		Audience: audience, Titulo: titulo, Cuerpo: cuerpo, Tipo: tipo,
+		Prioridad: prioridad, RequestID: requestID, Folio: folio,
+	}
 	_ = s.store.CreateNotification(&n)
 	return n
+}
+
+// defaultPriority asigna una prioridad según el tipo de notificación.
+func defaultPriority(tipo string) string {
+	switch tipo {
+	case "candidatos", "oportunidad":
+		return models.PrioImportante
+	case "estado":
+		return models.PrioInformativo
+	default:
+		return models.PrioInformativo
+	}
 }
 
 func (s *Server) notifyAdmin(titulo, cuerpo, tipo string) {

@@ -23,8 +23,26 @@ const (
 	RequestEnRevision       = "en_revision"
 	RequestEnProceso        = "en_proceso"
 	RequestCandidatosEnvia  = "candidatos_enviados"
+	RequestPausada          = "pausada"
 	RequestCerrada          = "cerrada"
 	RequestCancelada        = "cancelada"
+	RequestArchivada        = "archivada"
+)
+
+// Estados de un candidato dentro de una solicitud.
+const (
+	CandPendiente = "pendiente"
+	CandAceptado  = "aceptado"
+	CandRechazado = "rechazado"
+	CandRealizado = "realizado"
+)
+
+// Prioridades de las notificaciones.
+const (
+	PrioUrgente     = "urgente"
+	PrioImportante  = "importante"
+	PrioInformativo = "informativo"
+	PrioPromocional = "promocional"
 )
 
 // Worker es el perfil laboral de un trabajador registrado.
@@ -90,11 +108,12 @@ type Request struct {
 // Importante (requerimiento de privacidad): la empresa solo ve un subconjunto
 // de datos. CandidatePublic representa exactamente lo que la empresa puede ver.
 type Candidate struct {
-	ID        string    `json:"id"`
-	RequestID string    `json:"requestId"`
-	WorkerID  string    `json:"workerId"`
-	Estado    string    `json:"estado"` // confirmado / pendiente
-	CreatedAt time.Time `json:"createdAt"`
+	ID         string    `json:"id"`
+	RequestID  string    `json:"requestId"`
+	WorkerID   string    `json:"workerId"`
+	Estado     string    `json:"estado"`     // pendiente / aceptado / rechazado / realizado
+	Comentario string    `json:"comentario"` // observaciones de la empresa o admin
+	CreatedAt  time.Time `json:"createdAt"`
 }
 
 // CandidatePublic son los únicos datos del trabajador visibles para la empresa.
@@ -107,7 +126,8 @@ type CandidatePublic struct {
 	Oficio          string   `json:"oficio"`
 	Experiencia     int      `json:"experiencia"`
 	Certificaciones []string `json:"certificaciones"`
-	Estado          string   `json:"estado"` // confirmado / pendiente
+	Estado          string   `json:"estado"`     // pendiente / aceptado / rechazado / realizado
+	Comentario      string   `json:"comentario"` // observaciones
 }
 
 // Notification es una notificación directa (push interno, NO WhatsApp API).
@@ -116,8 +136,20 @@ type Notification struct {
 	Audience  string    `json:"audience"` // worker:<id> | company:<id> | admin | all
 	Titulo    string    `json:"titulo"`
 	Cuerpo    string    `json:"cuerpo"`
-	Tipo      string    `json:"tipo"` // info / oportunidad / estado / candidatos
+	Tipo      string    `json:"tipo"`      // info / oportunidad / estado / candidatos
+	Prioridad string    `json:"prioridad"` // urgente / importante / informativo / promocional
+	RequestID string    `json:"requestId,omitempty"`
+	Folio     string    `json:"folio,omitempty"`
 	Leida     bool      `json:"leida"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// HistoryEntry registra una acción sobre una solicitud (auditoría).
+type HistoryEntry struct {
+	ID        string    `json:"id"`
+	RequestID string    `json:"requestId"`
+	Accion    string    `json:"accion"` // texto legible de la acción
+	Actor     string    `json:"actor"`  // quién la hizo (email o rol)
 	CreatedAt time.Time `json:"createdAt"`
 }
 

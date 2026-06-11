@@ -90,6 +90,12 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS password_resets (
+  email TEXT PRIMARY KEY, code TEXT NOT NULL, expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS history (
+  id TEXT PRIMARY KEY, request_id TEXT, data TEXT NOT NULL, created_at TEXT
 );`
 	// Ambos motores aceptan ejecutar varias sentencias separadas por ';' una a una.
 	for _, stmt := range strings.Split(schema, ";") {
@@ -383,6 +389,18 @@ func (s *Store) AddCandidate(c *models.Candidate) error {
 		c.CreatedAt.Format(time.RFC3339))
 }
 
+func (s *Store) GetCandidate(id string) (*models.Candidate, error) {
+	var data string
+	if err := s.queryRow(`SELECT data FROM candidates WHERE id=?`, id).Scan(&data); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	var c models.Candidate
+	return &c, json.Unmarshal([]byte(data), &c)
+}
+
 // CandidateExists indica si el trabajador ya está en la solicitud.
 func (s *Store) CandidateExists(requestID, workerID string) (bool, error) {
 	var n int
@@ -394,6 +412,29 @@ func (s *Store) CandidateExists(requestID, workerID string) (bool, error) {
 
 func (s *Store) ListCandidates(requestID string) ([]models.Candidate, error) {
 	rows, err := s.query(`SELECT data FROM candidates WHERE request_id=? ORDER BY updated_at`, requestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []models.Candidate{}
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var c models.Candidate
+		if err := json.Unmarshal([]byte(data), &c); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// CandidatesByWorker devuelve las candidaturas de un trabajador.
+func (s *Store) CandidatesByWorker(workerID string) ([]models.Candidate, error) {
+	rows, err := s.query(
+		`SELECT data FROM candidates WHERE worker_id=? ORDER BY updated_at DESC`, workerID)
 	if err != nil {
 		return nil, err
 	}
@@ -439,6 +480,7 @@ func (s *Store) PublicCandidates(requestID string) ([]models.CandidatePublic, er
 			Experiencia:     w.AniosExperiencia,
 			Certificaciones: w.Certificaciones,
 			Estado:          c.Estado,
+			Comentario:      c.Comentario,
 		})
 	}
 	return out, nil
@@ -534,4 +576,72 @@ func (s *Store) scanUser(q, arg string) (*models.User, error) {
 	}
 	u.PasswordHash = hash // proviene de su columna, no del JSON
 	return &u, nil
+}
+
+// UpdateUserPassword cambia el hash de contraseña de un usuario.
+func (s *Store) UpdateUserPassword(id, hash string) error {
+	return s.exec(`UPDATE users SET password_hash=? WHERE id=?`, hash, id)
+}
+
+// ---------------- Password resets ----------------
+
+const upsertReset = `INSERT INTO password_resets (email,code,expires_at) VALUES (?,?,?)
+ON CONFLICT (email) DO UPDATE SET code=excluded.code, expires_at=excluded.expires_at`
+
+func (s *Store) SetReset(email, code string, expires time.Time) error {
+	return s.exec(upsertReset, normalizeEmail(email), code, expires.Format(time.RFC3339))
+}
+
+// GetReset devuelve el código y su expiración para un correo.
+func (s *Store) GetReset(email string) (code string, expires time.Time, err error) {
+	var exp string
+	row := s.queryRow(`SELECT code, expires_at FROM password_resets WHERE email=?`, normalizeEmail(email))
+	if err = row.Scan(&code, &exp); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", time.Time{}, ErrNotFound
+		}
+		return "", time.Time{}, err
+	}
+	expires, _ = time.Parse(time.RFC3339, exp)
+	return code, expires, nil
+}
+
+func (s *Store) DeleteReset(email string) error {
+	return s.exec(`DELETE FROM password_resets WHERE email=?`, normalizeEmail(email))
+}
+
+// ---------------- Historial / auditoría ----------------
+
+func (s *Store) AddHistory(h *models.HistoryEntry) error {
+	if h.ID == "" {
+		h.ID = uuid.NewString()
+	}
+	if h.CreatedAt.IsZero() {
+		h.CreatedAt = time.Now().UTC()
+	}
+	return s.exec(
+		`INSERT INTO history (id,request_id,data,created_at) VALUES (?,?,?,?)`,
+		h.ID, h.RequestID, marshal(h), h.CreatedAt.Format(time.RFC3339))
+}
+
+func (s *Store) ListHistory(requestID string) ([]models.HistoryEntry, error) {
+	rows, err := s.query(
+		`SELECT data FROM history WHERE request_id=? ORDER BY created_at DESC`, requestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []models.HistoryEntry{}
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var h models.HistoryEntry
+		if err := json.Unmarshal([]byte(data), &h); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
 }
