@@ -29,8 +29,9 @@ func CandidateList(req *models.Request, cands []models.CandidatePublic) ([]byte,
 	// Datos de la solicitud
 	pdf.SetTextColor(0, 0, 0)
 	pdf.SetFont("Helvetica", "B", 13)
-	pdf.CellFormat(0, 8, tr(pdf, "Solicitud"), "", 1, "L", false, 0, "")
+	pdf.CellFormat(0, 8, tr(pdf, "Solicitud "+req.Folio), "", 1, "L", false, 0, "")
 	pdf.SetFont("Helvetica", "", 11)
+	line(pdf, "Folio", req.Folio)
 	line(pdf, "Tipo de trabajador", req.TipoTrabajador)
 	line(pdf, "Cantidad", itoa(req.CantidadTrabajadores))
 	line(pdf, "Zona", req.CiudadZona)

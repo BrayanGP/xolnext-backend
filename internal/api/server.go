@@ -61,7 +61,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/requests", s.requireRole(models.RoleCompany, s.createRequest))
 	mux.HandleFunc("GET /api/requests", s.withAuth(s.listRequests)) // admin: todas / empresa: las suyas
 	mux.HandleFunc("GET /api/requests/{id}", s.withAuth(s.getRequest))
-	mux.HandleFunc("PATCH /api/requests/{id}/status", s.requireRole(admin, s.updateRequestStatus))
+	mux.HandleFunc("PATCH /api/requests/{id}/status", s.withAuth(s.updateRequestStatus))
 
 	// Candidatos
 	mux.HandleFunc("POST /api/requests/{id}/candidates", s.requireRole(admin, s.addCandidate))
@@ -285,8 +285,8 @@ func (s *Server) createRequest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.notifyAdmin("Nueva solicitud", fmt.Sprintf("Solicitud de %d x %s en %s",
-		rq.CantidadTrabajadores, rq.TipoTrabajador, rq.CiudadZona), "info")
+	s.notifyAdmin("Nueva solicitud "+rq.Folio, fmt.Sprintf("%s · %d x %s en %s",
+		rq.Folio, rq.CantidadTrabajadores, rq.TipoTrabajador, rq.CiudadZona), "info")
 	writeJSON(w, http.StatusCreated, rq)
 }
 
@@ -325,6 +325,8 @@ func (s *Server) getRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateRequestStatus(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	u := s.currentUser(r)
 	var body struct {
 		Estado string `json:"estado"`
 	}
@@ -332,19 +334,33 @@ func (s *Server) updateRequestStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "estado requerido")
 		return
 	}
-	rq, err := s.store.UpdateRequestStatus(r.PathValue("id"), body.Estado)
+	// El admin puede fijar cualquier estado. La empresa dueña solo puede
+	// cancelar o cerrar sus propias solicitudes.
+	if !u.IsAdmin() {
+		existing, err := s.store.GetRequest(id)
+		if err != nil {
+			s.handleStoreErr(w, err)
+			return
+		}
+		ownAction := body.Estado == models.RequestCancelada || body.Estado == models.RequestCerrada
+		if existing.CompanyID != u.CompanyID || !ownAction {
+			writeErr(w, http.StatusForbidden, "no autorizado para este cambio de estado")
+			return
+		}
+	}
+	rq, err := s.store.UpdateRequestStatus(id, body.Estado)
 	if err != nil {
 		s.handleStoreErr(w, err)
 		return
 	}
 	// Avisar a la empresa cuando hay candidatos enviados.
 	if body.Estado == models.RequestCandidatosEnvia && rq.CompanyID != "" {
-		s.hub.Broadcast(s.persistNotif("company:"+rq.CompanyID, "Candidatos enviados",
-			"neXus te envió una lista de candidatos para tu solicitud.", "candidatos"))
+		s.hub.Broadcast(s.persistNotif("company:"+rq.CompanyID, "Candidatos enviados · "+rq.Folio,
+			"neXus te envió candidatos para tu solicitud "+rq.Folio+" ("+rq.TipoTrabajador+").", "candidatos"))
 		if co, err := s.store.GetCompany(rq.CompanyID); err == nil {
-			go s.mailer.Send(co.Correo, "neXus · Candidatos enviados",
-				"Hola "+co.PersonaContacto+",\n\nneXus preparó una lista de candidatos para tu solicitud de "+
-					rq.TipoTrabajador+". Ingresa a la app para revisarla.\n\n— neXus")
+			go s.mailer.Send(co.Correo, "neXus · Candidatos enviados ("+rq.Folio+")",
+				"Hola "+co.PersonaContacto+",\n\nneXus preparó una lista de candidatos para tu solicitud "+
+					rq.Folio+" ("+rq.TipoTrabajador+"). Ingresa a la app para revisarla.\n\n— neXus")
 		}
 	}
 	writeJSON(w, http.StatusOK, rq)
@@ -358,13 +374,22 @@ func (s *Server) addCandidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.RequestID = requestID
+	// Evitar agregar el mismo trabajador dos veces a la solicitud.
+	if exists, _ := s.store.CandidateExists(requestID, c.WorkerID); exists {
+		writeErr(w, http.StatusConflict, "este trabajador ya está agregado a la solicitud")
+		return
+	}
 	if err := s.store.AddCandidate(&c); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	// Notificar al trabajador que fue invitado a una oportunidad.
+	folio := ""
+	if rq, err := s.store.GetRequest(requestID); err == nil {
+		folio = rq.Folio
+	}
 	s.hub.Broadcast(s.persistNotif("worker:"+c.WorkerID, "Nueva oportunidad",
-		"Fuiste incluido como candidato en una solicitud.", "oportunidad"))
+		"Fuiste incluido como candidato en la solicitud "+folio+".", "oportunidad"))
 	if wk, err := s.store.GetWorker(c.WorkerID); err == nil {
 		go s.mailer.Send(wk.Correo, "neXus · Nueva oportunidad",
 			"Hola "+wk.NombreCompleto+",\n\nFuiste incluido como candidato en una solicitud de personal en neXus. "+

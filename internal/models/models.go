@@ -67,6 +67,7 @@ type Company struct {
 // Request es una solicitud de personal creada por una empresa.
 type Request struct {
 	ID                      string    `json:"id"`
+	Folio                   string    `json:"folio"` // identificador único legible, ej "NX-7K2P9Q"
 	CompanyID               string    `json:"companyId"`
 	TipoTrabajador          string    `json:"tipoTrabajador"`
 	CantidadTrabajadores    int       `json:"cantidadTrabajadores"`

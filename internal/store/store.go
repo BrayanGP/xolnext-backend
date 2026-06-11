@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -286,6 +287,9 @@ func (s *Store) CreateRequest(r *models.Request) error {
 	if r.ID == "" {
 		r.ID = uuid.NewString()
 	}
+	if r.Folio == "" {
+		r.Folio = generateFolio()
+	}
 	now := time.Now().UTC()
 	if r.CreatedAt.IsZero() {
 		r.CreatedAt = now
@@ -295,6 +299,16 @@ func (s *Store) CreateRequest(r *models.Request) error {
 		r.Estado = models.RequestNueva
 	}
 	return s.exec(upsertRequest, r.ID, marshal(r), r.Estado, r.UpdatedAt.Format(time.RFC3339))
+}
+
+// generateFolio crea un folio legible tipo "NX-7K2P9Q".
+func generateFolio() string {
+	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // sin caracteres ambiguos
+	b := make([]byte, 6)
+	for i := range b {
+		b[i] = alphabet[rand.IntN(len(alphabet))]
+	}
+	return "NX-" + string(b)
 }
 
 func (s *Store) ListRequests(estado string) ([]models.Request, error) {
@@ -369,6 +383,15 @@ func (s *Store) AddCandidate(c *models.Candidate) error {
 		c.CreatedAt.Format(time.RFC3339))
 }
 
+// CandidateExists indica si el trabajador ya está en la solicitud.
+func (s *Store) CandidateExists(requestID, workerID string) (bool, error) {
+	var n int
+	err := s.queryRow(
+		`SELECT COUNT(*) FROM candidates WHERE request_id=? AND worker_id=?`,
+		requestID, workerID).Scan(&n)
+	return n > 0, err
+}
+
 func (s *Store) ListCandidates(requestID string) ([]models.Candidate, error) {
 	rows, err := s.query(`SELECT data FROM candidates WHERE request_id=? ORDER BY updated_at`, requestID)
 	if err != nil {
@@ -397,7 +420,12 @@ func (s *Store) PublicCandidates(requestID string) ([]models.CandidatePublic, er
 		return nil, err
 	}
 	out := []models.CandidatePublic{}
+	seen := map[string]bool{}
 	for _, c := range cands {
+		if seen[c.WorkerID] {
+			continue // evitar candidatos duplicados
+		}
+		seen[c.WorkerID] = true
 		w, err := s.GetWorker(c.WorkerID)
 		if err != nil {
 			continue
