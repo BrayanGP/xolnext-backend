@@ -158,6 +158,10 @@ func (s *Server) updateWorker(w http.ResponseWriter, r *http.Request) {
 	}
 	wk.ID = id
 	wk.CreatedAt = existing.CreatedAt
+	// La foto y los certificados se gestionan SOLO por sus endpoints de subida.
+	// Una edición de perfil nunca debe borrarlos: preservamos los existentes.
+	wk.FotoURL = existing.FotoURL
+	wk.CertificadosArchivos = existing.CertificadosArchivos
 	if wk.Disponibilidad == "" {
 		wk.Disponibilidad = models.WorkerDisponible
 	}
