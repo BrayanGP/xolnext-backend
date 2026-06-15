@@ -117,6 +117,8 @@ type Request struct {
 	CertificacionesRequeridas []string `json:"certificacionesRequeridas"`
 	DescripcionTrabajo      string    `json:"descripcionTrabajo"`
 	Comentarios             string    `json:"comentarios"`
+	MetodoPago              string    `json:"metodoPago"`       // efectivo / transferencia / ...
+	GeneroRequerido         string    `json:"generoRequerido"`  // opcional: cualquiera / masculino / femenino
 	Estado                  string    `json:"estado"` // nueva / en_revision / ...
 	CreatedAt               time.Time `json:"createdAt"`
 	UpdatedAt               time.Time `json:"updatedAt"`
@@ -128,13 +130,21 @@ type Request struct {
 // Importante (requerimiento de privacidad): la empresa solo ve un subconjunto
 // de datos. CandidatePublic representa exactamente lo que la empresa puede ver.
 type Candidate struct {
-	ID         string    `json:"id"`
-	RequestID  string    `json:"requestId"`
-	WorkerID   string    `json:"workerId"`
-	Estado     string    `json:"estado"`     // pendiente / aceptado / rechazado / realizado
-	Comentario string    `json:"comentario"` // observaciones de la empresa o admin
-	CreatedAt  time.Time `json:"createdAt"`
+	ID                 string    `json:"id"`
+	RequestID          string    `json:"requestId"`
+	WorkerID           string    `json:"workerId"`
+	Estado             string    `json:"estado"`     // decisión de la empresa: pendiente/aceptado/rechazado/realizado
+	RespuestaTrabajador string   `json:"respuestaTrabajador"` // del trabajador: pendiente/confirmada/declinada
+	Comentario         string    `json:"comentario"` // observaciones de la empresa o admin
+	CreatedAt          time.Time `json:"createdAt"`
 }
+
+// Respuesta del trabajador a una oportunidad.
+const (
+	RespPendiente  = "pendiente"
+	RespConfirmada = "confirmada"
+	RespDeclinada  = "declinada"
+)
 
 // CandidatePublic son los únicos datos del trabajador visibles para la empresa.
 // NO incluye teléfono, correo ni dirección (datos privados).
@@ -147,6 +157,7 @@ type CandidatePublic struct {
 	Experiencia     int      `json:"experiencia"`
 	Certificaciones []string `json:"certificaciones"`
 	Estado          string   `json:"estado"`     // pendiente / aceptado / rechazado / realizado
+	RespuestaTrabajador string `json:"respuestaTrabajador"` // confirmada/declinada/pendiente
 	Comentario      string   `json:"comentario"` // observaciones
 	Rating          float64  `json:"rating"`     // promedio de calificaciones del trabajador
 	RatingCount     int      `json:"ratingCount"`

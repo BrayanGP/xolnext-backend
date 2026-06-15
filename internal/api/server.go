@@ -82,6 +82,10 @@ func (s *Server) Routes() http.Handler {
 
 	// Oportunidades del trabajador (solicitudes donde es candidato)
 	mux.HandleFunc("GET /api/me/opportunities", s.requireRole(models.RoleWorker, s.myOpportunities))
+	mux.HandleFunc("PATCH /api/me/opportunities/{cid}", s.requireRole(models.RoleWorker, s.respondOpportunity))
+
+	// Desempeño del trabajador (rating + horas + comentarios)
+	mux.HandleFunc("GET /api/workers/{id}/performance", s.withAuth(s.workerPerformance))
 
 	// Reputación / calificaciones
 	mux.HandleFunc("POST /api/ratings", s.withAuth(s.addRating))
@@ -534,14 +538,18 @@ func (s *Server) publicCandidates(w http.ResponseWriter, r *http.Request) {
 func (s *Server) myOpportunities(w http.ResponseWriter, r *http.Request) {
 	u := s.currentUser(r)
 	type opportunity struct {
+		CandidateID    string `json:"candidateId"`
 		RequestID      string `json:"requestId"`
 		CompanyID      string `json:"companyId"`
 		Folio          string `json:"folio"`
 		TipoTrabajador string `json:"tipoTrabajador"`
 		CiudadZona     string `json:"ciudadZona"`
 		FechaInicio    string `json:"fechaInicio"`
+		HoraInicio     string `json:"horaInicio"`
+		PagoEstimado   float64 `json:"pagoEstimadoHora"`
 		RequestEstado  string `json:"requestEstado"`
 		MiEstado       string `json:"miEstado"`
+		MiRespuesta    string `json:"miRespuesta"`
 	}
 	out := []opportunity{}
 	if u.WorkerID == "" {
@@ -559,12 +567,88 @@ func (s *Server) myOpportunities(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		out = append(out, opportunity{
+			CandidateID: c.ID, RequestID: rq.ID, CompanyID: rq.CompanyID,
 			Folio: rq.Folio, TipoTrabajador: rq.TipoTrabajador,
 			CiudadZona: rq.CiudadZona, FechaInicio: rq.FechaInicio,
+			HoraInicio: rq.HoraInicio, PagoEstimado: rq.PagoEstimadoHora,
 			RequestEstado: rq.Estado, MiEstado: c.Estado,
+			MiRespuesta: c.RespuestaTrabajador,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// respondOpportunity: el trabajador confirma o declina su candidatura.
+func (s *Server) respondOpportunity(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	c, err := s.store.GetCandidate(r.PathValue("cid"))
+	if err != nil {
+		s.handleStoreErr(w, err)
+		return
+	}
+	if c.WorkerID != u.WorkerID {
+		writeErr(w, http.StatusForbidden, "no autorizado")
+		return
+	}
+	var body struct {
+		Respuesta string `json:"respuesta"`
+	}
+	if err := decode(r, &body); err != nil ||
+		(body.Respuesta != models.RespConfirmada && body.Respuesta != models.RespDeclinada) {
+		writeErr(w, http.StatusBadRequest, "respuesta inválida (confirmada/declinada)")
+		return
+	}
+	c.RespuestaTrabajador = body.Respuesta
+	if err := s.store.AddCandidate(c); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Avisar al admin y a la empresa dueña.
+	folio, companyID := "", ""
+	if rq, err := s.store.GetRequest(c.RequestID); err == nil {
+		folio, companyID = rq.Folio, rq.CompanyID
+	}
+	wkNombre := ""
+	if wk, err := s.store.GetWorker(c.WorkerID); err == nil {
+		wkNombre = wk.NombreCompleto
+	}
+	msg := wkNombre + " " + (map[string]string{
+		models.RespConfirmada: "confirmó", models.RespDeclinada: "declinó",
+	}[body.Respuesta]) + " la oportunidad " + folio + "."
+	s.notifyAdmin("Respuesta de candidato", msg, "estado")
+	if companyID != "" {
+		s.hub.Broadcast(s.persistNotifFull("company:"+companyID, "Respuesta de candidato",
+			msg, "estado", models.PrioInformativo, c.RequestID, folio))
+	}
+	s.recordHistory(c.RequestID, msg, s.actorLabel(r))
+	writeJSON(w, http.StatusOK, c)
+}
+
+// workerPerformance devuelve el desempeño del trabajador: rating, horas y
+// comentarios. Lo ve el admin, la empresa dueña de una solicitud, o el propio.
+func (s *Server) workerPerformance(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	u := s.currentUser(r)
+	if !u.IsAdmin() && u.WorkerID != id && u.Role != models.RoleCompany {
+		writeErr(w, http.StatusForbidden, "no autorizado")
+		return
+	}
+	rs := s.store.RatingSummary(id)
+	cands, _ := s.store.CandidatesByWorker(id)
+	comentarios := []map[string]any{}
+	for _, c := range cands {
+		if c.Comentario != "" {
+			comentarios = append(comentarios, map[string]any{
+				"comentario": c.Comentario, "estado": c.Estado,
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"rating":      rs.Average,
+		"ratingCount": rs.Count,
+		"totalHoras":  s.store.WorkerTotalHours(id),
+		"comentarios": comentarios,
+	})
 }
 
 // updateCandidate permite a admin o a la empresa dueña aceptar/rechazar y

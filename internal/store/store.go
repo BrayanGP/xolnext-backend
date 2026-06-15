@@ -448,6 +448,9 @@ func (s *Store) AddCandidate(c *models.Candidate) error {
 	if c.Estado == "" {
 		c.Estado = "pendiente"
 	}
+	if c.RespuestaTrabajador == "" {
+		c.RespuestaTrabajador = models.RespPendiente
+	}
 	return s.exec(upsertCandidate, c.ID, c.RequestID, c.WorkerID, marshal(c),
 		c.CreatedAt.Format(time.RFC3339))
 }
@@ -543,10 +546,11 @@ func (s *Store) PublicCandidates(requestID string) ([]models.CandidatePublic, er
 			Oficio:          w.OficioPrincipal,
 			Experiencia:     w.AniosExperiencia,
 			Certificaciones: w.Certificaciones,
-			Estado:          c.Estado,
-			Comentario:      c.Comentario,
-			Rating:          rs.Average,
-			RatingCount:     rs.Count,
+			Estado:              c.Estado,
+			RespuestaTrabajador: c.RespuestaTrabajador,
+			Comentario:          c.Comentario,
+			Rating:              rs.Average,
+			RatingCount:         rs.Count,
 		})
 	}
 	return out, nil
@@ -734,6 +738,16 @@ func (s *Store) AddWorkHours(requestID, workerID string, horas float64, nota str
 	return s.exec(
 		`INSERT INTO work_hours (id,request_id,worker_id,horas,data,created_at) VALUES (?,?,?,?,?,?)`,
 		id, requestID, workerID, horas, string(data), time.Now().UTC().Format(time.RFC3339))
+}
+
+// WorkerTotalHours suma todas las horas registradas de un trabajador.
+func (s *Store) WorkerTotalHours(workerID string) float64 {
+	var total sql.NullFloat64
+	_ = s.queryRow(`SELECT SUM(horas) FROM work_hours WHERE worker_id=?`, workerID).Scan(&total)
+	if total.Valid {
+		return total.Float64
+	}
+	return 0
 }
 
 // WorkHours devuelve las entradas de horas de una solicitud y el total.
