@@ -78,7 +78,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/requests/{id}/candidates/public", s.withAuth(s.publicCandidates))
 	mux.HandleFunc("PATCH /api/requests/{id}/candidates/{cid}", s.withAuth(s.updateCandidate))
 	mux.HandleFunc("GET /api/requests/{id}/candidates.pdf", s.withAuth(s.candidatesPDF))
-	mux.HandleFunc("GET /api/requests/{id}/history", s.requireRole(admin, s.requestHistory))
+	mux.HandleFunc("GET /api/requests/{id}/history", s.withAuth(s.requestHistory))
 
 	// Oportunidades del trabajador (solicitudes donde es candidato)
 	mux.HandleFunc("GET /api/me/opportunities", s.requireRole(models.RoleWorker, s.myOpportunities))
@@ -704,7 +704,12 @@ func (s *Server) updateCandidate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) requestHistory(w http.ResponseWriter, r *http.Request) {
-	h, err := s.store.ListHistory(r.PathValue("id"))
+	id := r.PathValue("id")
+	if !s.canAccessRequest(r, id) {
+		writeErr(w, http.StatusForbidden, "no autorizado")
+		return
+	}
+	h, err := s.store.ListHistory(id)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

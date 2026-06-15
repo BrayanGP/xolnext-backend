@@ -119,9 +119,17 @@ type Request struct {
 	Comentarios             string    `json:"comentarios"`
 	MetodoPago              string    `json:"metodoPago"`       // efectivo / transferencia / ...
 	GeneroRequerido         string    `json:"generoRequerido"`  // opcional: cualquiera / masculino / femenino
+	Perfiles                []RequestProfile `json:"perfiles,omitempty"` // varios perfiles en una misma solicitud
 	Estado                  string    `json:"estado"` // nueva / en_revision / ...
 	CreatedAt               time.Time `json:"createdAt"`
 	UpdatedAt               time.Time `json:"updatedAt"`
+}
+
+// RequestProfile es un perfil solicitado (tipo + cantidad) dentro de una
+// solicitud que puede pedir varios perfiles distintos.
+type RequestProfile struct {
+	TipoTrabajador string `json:"tipoTrabajador"`
+	Cantidad       int    `json:"cantidad"`
 }
 
 // Candidate vincula un trabajador a una solicitud dentro de la lista que el
