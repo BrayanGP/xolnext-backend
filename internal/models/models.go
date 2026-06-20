@@ -57,6 +57,8 @@ type Worker struct {
 	OficioPrincipal   string    `json:"oficioPrincipal"`
 	AniosExperiencia  int       `json:"aniosExperiencia"`
 	Habilidades       []string  `json:"habilidades"`
+	CompetenciasTecnicas  []string `json:"competenciasTecnicas"`  // separadas del oficio principal
+	CompetenciasPersonales []string `json:"competenciasPersonales"`
 	Certificaciones   []string  `json:"certificaciones"`
 	Licencias         []string  `json:"licencias"`
 	Disponibilidad    string    `json:"disponibilidad"` // disponible / no_disponible
@@ -120,6 +122,23 @@ type Request struct {
 	MetodoPago              string    `json:"metodoPago"`       // efectivo / transferencia / ...
 	GeneroRequerido         string    `json:"generoRequerido"`  // opcional: cualquiera / masculino / femenino
 	Perfiles                []RequestProfile `json:"perfiles,omitempty"` // varios perfiles en una misma solicitud
+	// Información ampliada de la oportunidad (transparencia total: el trabajador
+	// debe poder ver TODO antes de aceptar — punto clave del MVP).
+	Direccion               string    `json:"direccion"`               // dirección del sitio
+	LlegaDirecto            bool      `json:"llegaDirecto"`            // true: llega directo al sitio; false: hay punto de reunión
+	PuntoReunion            string    `json:"puntoReunion"`            // lugar de reunión / dónde se recoge al personal
+	HoraReunion             string    `json:"horaReunion"`
+	PersonaContacto         string    `json:"personaContacto"`
+	TelefonoContacto        string    `json:"telefonoContacto"`
+	ExperienciaRequerida    string    `json:"experienciaRequerida"`
+	Viaticos                string    `json:"viaticos"`                // viáticos: no / incluidos / detalle
+	Transporte              string    `json:"transporte"`              // transporte: no / incluido / detalle
+	Comida                  string    `json:"comida"`                  // comida: no / incluida / detalle
+	EquipoProteccion        string    `json:"equipoProteccion"`        // EPP requerido por la empresa
+	HerramientasLleva       string    `json:"herramientasLleva"`       // herramientas que aporta el trabajador
+	HerramientasProporciona string    `json:"herramientasProporciona"` // herramientas que da la empresa
+	RequisitosAdicionales   string    `json:"requisitosAdicionales"`
+	EsConstruccion          bool      `json:"esConstruccion"`          // muestra la nota fija de EPP de obra
 	Estado                  string    `json:"estado"` // nueva / en_revision / ...
 	CreatedAt               time.Time `json:"createdAt"`
 	UpdatedAt               time.Time `json:"updatedAt"`
@@ -169,7 +188,39 @@ type CandidatePublic struct {
 	Comentario      string   `json:"comentario"` // observaciones
 	Rating          float64  `json:"rating"`     // promedio de calificaciones del trabajador
 	RatingCount     int      `json:"ratingCount"`
+	TrabajosConcluidos int   `json:"trabajosConcluidos"` // candidaturas marcadas como realizadas
+	TotalHoras      float64  `json:"totalHoras"`
+	CompetenciasTecnicas  []string `json:"competenciasTecnicas"`
+	CompetenciasPersonales []string `json:"competenciasPersonales"`
+	Licencias       []string `json:"licencias"`
+	AniosExperiencia int     `json:"aniosExperiencia"`
 }
+
+// Complaint es una queja o aclaración levantada por un trabajador o empresa.
+// Permite a neXus dar seguimiento formal a incidencias (módulo Quejas y
+// Aclaraciones del MVP).
+type Complaint struct {
+	ID            string    `json:"id"`
+	AuthorUserID  string    `json:"authorUserId"`
+	AuthorRole    string    `json:"authorRole"`
+	AuthorNombre  string    `json:"authorNombre"`
+	RequestID     string    `json:"requestId,omitempty"`
+	Folio         string    `json:"folio,omitempty"`
+	Categoria     string    `json:"categoria"` // pago / seguridad / conducta / horario / otro
+	Asunto        string    `json:"asunto"`
+	Mensaje       string    `json:"mensaje"`
+	Estado        string    `json:"estado"` // abierta / en_revision / resuelta
+	RespuestaAdmin string   `json:"respuestaAdmin,omitempty"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+}
+
+// Estados de una queja/aclaración.
+const (
+	ComplaintAbierta  = "abierta"
+	ComplaintRevision = "en_revision"
+	ComplaintResuelta = "resuelta"
+)
 
 // Notification es una notificación directa (push interno, NO WhatsApp API).
 type Notification struct {

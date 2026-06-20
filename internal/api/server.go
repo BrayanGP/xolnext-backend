@@ -8,6 +8,7 @@ import (
 	"log"
 	"mime/multipart"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/BrayanGP/nexus-backend/internal/config"
@@ -26,10 +27,46 @@ type Server struct {
 	mailer  *mailer.Mailer
 	cfg     config.Config
 	secret  string
+
+	// Caché en memoria de respuestas calientes (patrón de reciclado de llamadas).
+	// El store es un singleton; esta caché evita recalcular agregados costosos
+	// como las estadísticas públicas en cada visita a la pantalla de explorar.
+	cacheMu sync.RWMutex
+	memo    map[string]memoEntry
+}
+
+type memoEntry struct {
+	value   any
+	expires time.Time
 }
 
 func New(st *store.Store, hub *notify.Hub, fs storage.Storage, m *mailer.Mailer, cfg config.Config) *Server {
-	return &Server{store: st, hub: hub, storage: fs, mailer: m, cfg: cfg, secret: cfg.JWTSecret}
+	return &Server{store: st, hub: hub, storage: fs, mailer: m, cfg: cfg, secret: cfg.JWTSecret,
+		memo: map[string]memoEntry{}}
+}
+
+// memoGet devuelve un valor cacheado si sigue vigente.
+func (s *Server) memoGet(key string) (any, bool) {
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	e, ok := s.memo[key]
+	if !ok || time.Now().After(e.expires) {
+		return nil, false
+	}
+	return e.value, true
+}
+
+func (s *Server) memoSet(key string, value any, ttl time.Duration) {
+	s.cacheMu.Lock()
+	s.memo[key] = memoEntry{value: value, expires: time.Now().Add(ttl)}
+	s.cacheMu.Unlock()
+}
+
+// memoInvalidate borra una clave (tras una escritura que la afecta).
+func (s *Server) memoInvalidate(key string) {
+	s.cacheMu.Lock()
+	delete(s.memo, key)
+	s.cacheMu.Unlock()
 }
 
 // Routes construye el http.Handler con todas las rutas y el middleware CORS.
@@ -65,6 +102,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/companies", s.requireRole(admin, s.listCompanies)) // solo admin
 	mux.HandleFunc("GET /api/companies/{id}", s.withAuth(s.getCompany))          // dueño o admin
 	mux.HandleFunc("PUT /api/companies/{id}", s.withAuth(s.updateCompany))       // dueño o admin
+	mux.HandleFunc("DELETE /api/companies/{id}", s.requireRole(admin, s.deleteCompany))
+	mux.HandleFunc("DELETE /api/workers/{id}", s.requireRole(admin, s.deleteWorker))
+	mux.HandleFunc("GET /api/companies/{id}/requests", s.withAuth(s.companyRequests)) // historial
+	mux.HandleFunc("GET /api/companies/{id}/performance", s.withAuth(s.companyPerformance))
 
 	// Solicitudes
 	mux.HandleFunc("POST /api/requests", s.requireRole(models.RoleCompany, s.createRequest))
@@ -77,6 +118,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/requests/{id}/candidates", s.requireRole(admin, s.listCandidates))
 	mux.HandleFunc("GET /api/requests/{id}/candidates/public", s.withAuth(s.publicCandidates))
 	mux.HandleFunc("PATCH /api/requests/{id}/candidates/{cid}", s.withAuth(s.updateCandidate))
+	mux.HandleFunc("DELETE /api/requests/{id}/candidates/{cid}", s.requireRole(admin, s.deleteCandidate))
 	mux.HandleFunc("GET /api/requests/{id}/candidates.pdf", s.withAuth(s.candidatesPDF))
 	mux.HandleFunc("GET /api/requests/{id}/history", s.withAuth(s.requestHistory))
 
@@ -102,7 +144,14 @@ func (s *Server) Routes() http.Handler {
 	// Notificaciones directas (la audiencia se deriva del token)
 	mux.HandleFunc("POST /api/notifications", s.requireRole(admin, s.createNotification))
 	mux.HandleFunc("GET /api/notifications", s.withAuth(s.listNotifications))
+	mux.HandleFunc("POST /api/notifications/read-all", s.withAuth(s.markAllRead))
+	mux.HandleFunc("POST /api/notifications/{id}/read", s.withAuth(s.markNotificationRead))
 	mux.HandleFunc("GET /api/stream", s.withAuth(s.stream)) // SSE
+
+	// Quejas y aclaraciones
+	mux.HandleFunc("POST /api/complaints", s.withAuth(s.createComplaint))
+	mux.HandleFunc("GET /api/complaints", s.withAuth(s.listComplaints))
+	mux.HandleFunc("PATCH /api/complaints/{id}", s.requireRole(admin, s.updateComplaint))
 
 	// Servir archivos subidos (solo backend de almacenamiento local/Volume).
 	if prefix, h, ok := s.storage.FileServer(); ok {
@@ -164,7 +213,13 @@ func (s *Server) legal(w http.ResponseWriter, r *http.Request) {
 // publicStats devuelve estadísticas agregadas (sin datos personales) para la
 // pantalla de exploración pública.
 func (s *Server) publicStats(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.store.PublicStats())
+	if v, ok := s.memoGet("publicStats"); ok {
+		writeJSON(w, http.StatusOK, v)
+		return
+	}
+	stats := s.store.PublicStats()
+	s.memoSet("publicStats", stats, 60*time.Second)
+	writeJSON(w, http.StatusOK, stats)
 }
 
 // diagnostics expone configuración no sensible para diagnosticar el entorno.
@@ -409,7 +464,15 @@ func (s *Server) getRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := s.currentUser(r)
-	if !u.IsAdmin() && rq.CompanyID != u.CompanyID {
+	allowed := u.IsAdmin() || rq.CompanyID == u.CompanyID
+	// Un trabajador candidato puede ver TODA la oportunidad antes de aceptar
+	// (punto clave del MVP: transparencia total trabajador/empresa/neXus).
+	if !allowed && u.Role == models.RoleWorker && u.WorkerID != "" {
+		if exists, _ := s.store.CandidateExists(rq.ID, u.WorkerID); exists {
+			allowed = true
+		}
+	}
+	if !allowed {
 		writeErr(w, http.StatusForbidden, "no autorizado")
 		return
 	}
@@ -644,10 +707,14 @@ func (s *Server) workerPerformance(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"rating":      rs.Average,
-		"ratingCount": rs.Count,
-		"totalHoras":  s.store.WorkerTotalHours(id),
-		"comentarios": comentarios,
+		"rating":             rs.Average,
+		"ratingCount":        rs.Count,
+		"totalHoras":         s.store.WorkerTotalHours(id),
+		"trabajosConcluidos": s.store.WorkerCompletedJobs(id),
+		"comentarios":        comentarios,
+		// Comentarios provenientes de las CALIFICACIONES (alimentan la
+		// reputación pública del trabajador — antes no se reflejaban).
+		"comentariosCalificacion": s.store.RatingComments(id),
 	})
 }
 
@@ -1017,6 +1084,215 @@ func (s *Server) myPlan(w http.ResponseWriter, r *http.Request) {
 		"limit":          models.PlanLimit(plan),
 		"activeRequests": s.activeRequests(u.CompanyID),
 	})
+}
+
+// ---------------- borrados administrativos (Ola C) ----------------
+
+func (s *Server) deleteCandidate(w http.ResponseWriter, r *http.Request) {
+	requestID := r.PathValue("id")
+	cid := r.PathValue("cid")
+	c, err := s.store.GetCandidate(cid)
+	if err != nil {
+		s.handleStoreErr(w, err)
+		return
+	}
+	if c.RequestID != requestID {
+		writeErr(w, http.StatusNotFound, "candidato no encontrado")
+		return
+	}
+	if err := s.store.DeleteCandidate(cid); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	wkNombre := c.WorkerID
+	if wk, err := s.store.GetWorker(c.WorkerID); err == nil {
+		wkNombre = wk.NombreCompleto
+	}
+	s.recordHistory(requestID, "Quitó candidato: "+wkNombre, s.actorLabel(r))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) deleteWorker(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := s.store.GetWorker(id); err != nil {
+		s.handleStoreErr(w, err)
+		return
+	}
+	if err := s.store.DeleteWorker(id); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.memoInvalidate("publicStats")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) deleteCompany(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := s.store.GetCompany(id); err != nil {
+		s.handleStoreErr(w, err)
+		return
+	}
+	if err := s.store.DeleteCompany(id); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.memoInvalidate("publicStats")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// companyRequests devuelve el historial de solicitudes de una empresa
+// (admin, o la propia empresa dueña).
+func (s *Server) companyRequests(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	u := s.currentUser(r)
+	if !u.IsAdmin() && u.CompanyID != id {
+		writeErr(w, http.StatusForbidden, "no autorizado")
+		return
+	}
+	reqs, err := s.store.RequestsByCompany(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, reqs)
+}
+
+// companyPerformance: vista rápida del desempeño de la empresa (Ola F).
+func (s *Server) companyPerformance(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	u := s.currentUser(r)
+	if !u.IsAdmin() && u.CompanyID != id {
+		writeErr(w, http.StatusForbidden, "no autorizado")
+		return
+	}
+	rs := s.store.RatingSummary(id)
+	reqs, _ := s.store.RequestsByCompany(id)
+	contratos := 0
+	trabajadores := 0
+	for _, rq := range reqs {
+		if rq.Estado == models.RequestCerrada {
+			contratos++
+		}
+		cands, _ := s.store.ListCandidates(rq.ID)
+		for _, c := range cands {
+			if c.Estado == models.CandAceptado || c.Estado == models.CandRealizado {
+				trabajadores++
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"rating":                rs.Average,
+		"ratingCount":           rs.Count,
+		"solicitudes":           len(reqs),
+		"contratosConcluidos":   contratos,
+		"trabajadoresContratados": trabajadores,
+		"comentarios":           s.store.RatingComments(id),
+	})
+}
+
+// ---------------- notificaciones: marcar leídas (Ola B) ----------------
+
+func (s *Server) markAllRead(w http.ResponseWriter, r *http.Request) {
+	aud := audienceForUser(s.currentUser(r))
+	if err := s.store.MarkAllNotificationsRead(aud); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) markNotificationRead(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.MarkNotificationRead(r.PathValue("id")); err != nil {
+		s.handleStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// ---------------- quejas y aclaraciones (Ola G) ----------------
+
+func (s *Server) createComplaint(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	var body struct {
+		RequestID string `json:"requestId"`
+		Folio     string `json:"folio"`
+		Categoria string `json:"categoria"`
+		Asunto    string `json:"asunto"`
+		Mensaje   string `json:"mensaje"`
+	}
+	if err := decode(r, &body); err != nil || body.Asunto == "" || body.Mensaje == "" {
+		writeErr(w, http.StatusBadRequest, "asunto y mensaje son obligatorios")
+		return
+	}
+	nombre := s.actorLabel(r)
+	c := &models.Complaint{
+		AuthorUserID: u.ID, AuthorRole: u.Role, AuthorNombre: nombre,
+		RequestID: body.RequestID, Folio: body.Folio, Categoria: body.Categoria,
+		Asunto: body.Asunto, Mensaje: body.Mensaje, Estado: models.ComplaintAbierta,
+	}
+	if err := s.store.CreateComplaint(c); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.notifyAdmin("Nueva queja/aclaración", body.Asunto+" — "+nombre, "info")
+	writeJSON(w, http.StatusCreated, c)
+}
+
+func (s *Server) listComplaints(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	author := u.ID
+	if u.IsAdmin() {
+		author = "" // el admin ve todas
+	}
+	cs, err := s.store.ListComplaints(author)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, cs)
+}
+
+func (s *Server) updateComplaint(w http.ResponseWriter, r *http.Request) {
+	c, err := s.store.GetComplaint(r.PathValue("id"))
+	if err != nil {
+		s.handleStoreErr(w, err)
+		return
+	}
+	var body struct {
+		Estado         string `json:"estado"`
+		RespuestaAdmin string `json:"respuestaAdmin"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "JSON inválido")
+		return
+	}
+	if body.Estado != "" {
+		c.Estado = body.Estado
+	}
+	if body.RespuestaAdmin != "" {
+		c.RespuestaAdmin = body.RespuestaAdmin
+	}
+	if err := s.store.CreateComplaint(c); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Avisar al autor de la queja.
+	s.hub.Broadcast(s.persistNotif(audienceForRole(c.AuthorRole, c.AuthorUserID, s),
+		"Actualización de tu queja", c.Asunto+": "+c.Estado, "estado"))
+	writeJSON(w, http.StatusOK, c)
+}
+
+// audienceForRole resuelve la audiencia de notificación del autor de una queja.
+func audienceForRole(role, userID string, s *Server) string {
+	if usr, err := s.store.GetUserByID(userID); err == nil {
+		switch role {
+		case models.RoleWorker:
+			return "worker:" + usr.WorkerID
+		case models.RoleCompany:
+			return "company:" + usr.CompanyID
+		}
+	}
+	return "admin"
 }
 
 // ---------------- utilidades internas ----------------

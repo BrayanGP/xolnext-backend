@@ -113,6 +113,9 @@ CREATE TABLE IF NOT EXISTS ratings (
 );
 CREATE TABLE IF NOT EXISTS work_hours (
   id TEXT PRIMARY KEY, request_id TEXT, worker_id TEXT, horas REAL, data TEXT NOT NULL, created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS complaints (
+  id TEXT PRIMARY KEY, author_user_id TEXT, estado TEXT, data TEXT NOT NULL, created_at TEXT
 );`
 	// Ambos motores aceptan ejecutar varias sentencias separadas por ';' una a una.
 	for _, stmt := range strings.Split(schema, ";") {
@@ -551,6 +554,12 @@ func (s *Store) PublicCandidates(requestID string) ([]models.CandidatePublic, er
 			Comentario:          c.Comentario,
 			Rating:              rs.Average,
 			RatingCount:         rs.Count,
+			TrabajosConcluidos:  s.WorkerCompletedJobs(w.ID),
+			TotalHoras:          s.WorkerTotalHours(w.ID),
+			CompetenciasTecnicas:   w.CompetenciasTecnicas,
+			CompetenciasPersonales: w.CompetenciasPersonales,
+			Licencias:           w.Licencias,
+			AniosExperiencia:    w.AniosExperiencia,
 		})
 	}
 	return out, nil
@@ -809,6 +818,202 @@ func (s *Store) ListHistory(requestID string) ([]models.HistoryEntry, error) {
 			return nil, err
 		}
 		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// ---------------- Notificaciones: estado de lectura ----------------
+
+// MarkNotificationRead marca una notificación como leída (persistente).
+func (s *Store) MarkNotificationRead(id string) error {
+	var data string
+	if err := s.queryRow(`SELECT data FROM notifications WHERE id=?`, id).Scan(&data); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	var n models.Notification
+	if err := json.Unmarshal([]byte(data), &n); err != nil {
+		return err
+	}
+	n.Leida = true
+	return s.exec(`UPDATE notifications SET data=? WHERE id=?`, marshal(&n), id)
+}
+
+// MarkAllNotificationsRead marca como leídas todas las notificaciones de una
+// audiencia. Persiste en la base de datos para que no reaparezcan al refrescar.
+func (s *Store) MarkAllNotificationsRead(audience string) error {
+	rows, err := s.query(`SELECT id, data FROM notifications WHERE audience=?`, audience)
+	if err != nil {
+		return err
+	}
+	type item struct{ id, data string }
+	var items []item
+	for rows.Next() {
+		var it item
+		if err := rows.Scan(&it.id, &it.data); err != nil {
+			rows.Close()
+			return err
+		}
+		items = append(items, it)
+	}
+	rows.Close()
+	for _, it := range items {
+		var n models.Notification
+		if json.Unmarshal([]byte(it.data), &n) == nil && !n.Leida {
+			n.Leida = true
+			if err := s.exec(`UPDATE notifications SET data=? WHERE id=?`, marshal(&n), it.id); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// ---------------- Borrados administrativos ----------------
+
+// DeleteCandidate quita un candidato de una solicitud.
+func (s *Store) DeleteCandidate(id string) error {
+	return s.exec(`DELETE FROM candidates WHERE id=?`, id)
+}
+
+// DeleteWorker elimina un trabajador y sus datos asociados (admin).
+func (s *Store) DeleteWorker(id string) error {
+	_ = s.exec(`DELETE FROM candidates WHERE worker_id=?`, id)
+	_ = s.exec(`DELETE FROM work_hours WHERE worker_id=?`, id)
+	_ = s.exec(`DELETE FROM ratings WHERE target_id=?`, id)
+	_ = s.exec(`DELETE FROM users WHERE data LIKE ?`, `%"workerId":"`+id+`"%`)
+	return s.exec(`DELETE FROM workers WHERE id=?`, id)
+}
+
+// DeleteCompany elimina una empresa y sus solicitudes (admin).
+func (s *Store) DeleteCompany(id string) error {
+	// Borrar candidatos/horas/historial de las solicitudes de la empresa.
+	reqs, _ := s.ListRequests("")
+	for _, rq := range reqs {
+		if rq.CompanyID == id {
+			_ = s.exec(`DELETE FROM candidates WHERE request_id=?`, rq.ID)
+			_ = s.exec(`DELETE FROM work_hours WHERE request_id=?`, rq.ID)
+			_ = s.exec(`DELETE FROM history WHERE request_id=?`, rq.ID)
+			_ = s.exec(`DELETE FROM requests WHERE id=?`, rq.ID)
+		}
+	}
+	_ = s.exec(`DELETE FROM ratings WHERE target_id=?`, id)
+	_ = s.exec(`DELETE FROM users WHERE data LIKE ?`, `%"companyId":"`+id+`"%`)
+	return s.exec(`DELETE FROM companies WHERE id=?`, id)
+}
+
+// RequestsByCompany devuelve las solicitudes de una empresa (historial).
+func (s *Store) RequestsByCompany(companyID string) ([]models.Request, error) {
+	all, err := s.ListRequests("")
+	if err != nil {
+		return nil, err
+	}
+	out := []models.Request{}
+	for _, rq := range all {
+		if rq.CompanyID == companyID {
+			out = append(out, rq)
+		}
+	}
+	return out, nil
+}
+
+// WorkerCompletedJobs cuenta las candidaturas marcadas como realizadas.
+func (s *Store) WorkerCompletedJobs(workerID string) int {
+	cands, _ := s.CandidatesByWorker(workerID)
+	n := 0
+	for _, c := range cands {
+		if c.Estado == models.CandRealizado {
+			n++
+		}
+	}
+	return n
+}
+
+// RatingComments devuelve los comentarios de las calificaciones de un objetivo
+// (para que alimenten la reputación pública del trabajador/empresa).
+func (s *Store) RatingComments(targetID string) []map[string]any {
+	rows, err := s.query(
+		`SELECT data FROM ratings WHERE target_id=? ORDER BY created_at DESC`, targetID)
+	if err != nil {
+		return []map[string]any{}
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var data string
+		if rows.Scan(&data) != nil {
+			continue
+		}
+		var rt models.Rating
+		if json.Unmarshal([]byte(data), &rt) == nil && rt.Comentario != "" {
+			out = append(out, map[string]any{
+				"stars": rt.Stars, "comentario": rt.Comentario, "rol": rt.RaterRole,
+			})
+		}
+	}
+	return out
+}
+
+// ---------------- Quejas y aclaraciones ----------------
+
+const upsertComplaint = `INSERT INTO complaints (id,author_user_id,estado,data,created_at) VALUES (?,?,?,?,?)
+ON CONFLICT (id) DO UPDATE SET estado=excluded.estado, data=excluded.data`
+
+func (s *Store) CreateComplaint(c *models.Complaint) error {
+	if c.ID == "" {
+		c.ID = uuid.NewString()
+	}
+	now := time.Now().UTC()
+	if c.CreatedAt.IsZero() {
+		c.CreatedAt = now
+	}
+	c.UpdatedAt = now
+	if c.Estado == "" {
+		c.Estado = models.ComplaintAbierta
+	}
+	return s.exec(upsertComplaint, c.ID, c.AuthorUserID, c.Estado, marshal(c),
+		c.CreatedAt.Format(time.RFC3339))
+}
+
+func (s *Store) GetComplaint(id string) (*models.Complaint, error) {
+	var data string
+	if err := s.queryRow(`SELECT data FROM complaints WHERE id=?`, id).Scan(&data); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	var c models.Complaint
+	return &c, json.Unmarshal([]byte(data), &c)
+}
+
+// ListComplaints: si authorUserID == "" devuelve todas (admin); si no, las del autor.
+func (s *Store) ListComplaints(authorUserID string) ([]models.Complaint, error) {
+	q := `SELECT data FROM complaints`
+	var args []any
+	if authorUserID != "" {
+		q += ` WHERE author_user_id=?`
+		args = append(args, authorUserID)
+	}
+	q += ` ORDER BY created_at DESC`
+	rows, err := s.query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []models.Complaint{}
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var c models.Complaint
+		if err := json.Unmarshal([]byte(data), &c); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
 	}
 	return out, rows.Err()
 }
