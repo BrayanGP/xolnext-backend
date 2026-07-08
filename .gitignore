@@ -1,6 +1,6 @@
 # Binarios compilados
-/nexus-backend
-/nexus-backend.exe
+/xolnext-backend
+/xolnext-backend.exe
 *.exe
 
 # Base de datos SQLite local

@@ -12,7 +12,7 @@ import (
 	"encoding/json"
 	"sync"
 
-	"github.com/BrayanGP/nexus-backend/internal/models"
+	"github.com/BrayanGP/xolnext-backend/internal/models"
 )
 
 // Hub mantiene los suscriptores conectados y difunde notificaciones.

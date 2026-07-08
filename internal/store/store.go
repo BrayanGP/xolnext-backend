@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/BrayanGP/nexus-backend/internal/models"
+	"github.com/BrayanGP/xolnext-backend/internal/models"
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib" // driver "pgx"
 	_ "modernc.org/sqlite"             // driver "sqlite"

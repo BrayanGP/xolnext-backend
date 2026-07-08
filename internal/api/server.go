@@ -1,4 +1,4 @@
-// Package api expone la API REST de neXus y el stream SSE de notificaciones.
+// Package api expone la API REST de XolNext y el stream SSE de notificaciones.
 package api
 
 import (
@@ -11,13 +11,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/BrayanGP/nexus-backend/internal/config"
-	"github.com/BrayanGP/nexus-backend/internal/mailer"
-	"github.com/BrayanGP/nexus-backend/internal/models"
-	"github.com/BrayanGP/nexus-backend/internal/notify"
-	"github.com/BrayanGP/nexus-backend/internal/pdfexport"
-	"github.com/BrayanGP/nexus-backend/internal/storage"
-	"github.com/BrayanGP/nexus-backend/internal/store"
+	"github.com/BrayanGP/xolnext-backend/internal/config"
+	"github.com/BrayanGP/xolnext-backend/internal/mailer"
+	"github.com/BrayanGP/xolnext-backend/internal/models"
+	"github.com/BrayanGP/xolnext-backend/internal/notify"
+	"github.com/BrayanGP/xolnext-backend/internal/pdfexport"
+	"github.com/BrayanGP/xolnext-backend/internal/storage"
+	"github.com/BrayanGP/xolnext-backend/internal/store"
 )
 
 type Server struct {
@@ -203,7 +203,7 @@ func decode(r *http.Request, v any) error {
 // ---------------- handlers ----------------
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "service": "nexus-backend", "time": time.Now()})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "service": "xolnext-backend", "time": time.Now()})
 }
 
 func (s *Server) legal(w http.ResponseWriter, r *http.Request) {
@@ -466,7 +466,7 @@ func (s *Server) getRequest(w http.ResponseWriter, r *http.Request) {
 	u := s.currentUser(r)
 	allowed := u.IsAdmin() || rq.CompanyID == u.CompanyID
 	// Un trabajador candidato puede ver TODA la oportunidad antes de aceptar
-	// (punto clave del MVP: transparencia total trabajador/empresa/neXus).
+	// (punto clave del MVP: transparencia total trabajador/empresa/XolNext).
 	if !allowed && u.Role == models.RoleWorker && u.WorkerID != "" {
 		if exists, _ := s.store.CandidateExists(rq.ID, u.WorkerID); exists {
 			allowed = true
@@ -515,12 +515,12 @@ func (s *Server) updateRequestStatus(w http.ResponseWriter, r *http.Request) {
 	// Avisar a la empresa cuando hay candidatos enviados.
 	if body.Estado == models.RequestCandidatosEnvia && rq.CompanyID != "" {
 		s.hub.Broadcast(s.persistNotifFull("company:"+rq.CompanyID, "Candidatos enviados · "+rq.Folio,
-			"neXus te envió candidatos para tu solicitud "+rq.Folio+" ("+rq.TipoTrabajador+").",
+			"XolNext te envió candidatos para tu solicitud "+rq.Folio+" ("+rq.TipoTrabajador+").",
 			"candidatos", models.PrioImportante, rq.ID, rq.Folio))
 		if co, err := s.store.GetCompany(rq.CompanyID); err == nil {
-			go s.mailer.Send(co.Correo, "neXus · Candidatos enviados ("+rq.Folio+")",
-				"Hola "+co.PersonaContacto+",\n\nneXus preparó una lista de candidatos para tu solicitud "+
-					rq.Folio+" ("+rq.TipoTrabajador+"). Ingresa a la app para revisarla.\n\n— neXus")
+			go s.mailer.Send(co.Correo, "XolNext · Candidatos enviados ("+rq.Folio+")",
+				"Hola "+co.PersonaContacto+",\n\nXolNext preparó una lista de candidatos para tu solicitud "+
+					rq.Folio+" ("+rq.TipoTrabajador+"). Ingresa a la app para revisarla.\n\n— XolNext")
 		}
 	}
 	writeJSON(w, http.StatusOK, rq)
@@ -551,9 +551,9 @@ func (s *Server) addCandidate(w http.ResponseWriter, r *http.Request) {
 	wkNombre := c.WorkerID
 	if wk, err := s.store.GetWorker(c.WorkerID); err == nil {
 		wkNombre = wk.NombreCompleto
-		go s.mailer.Send(wk.Correo, "neXus · Nueva oportunidad",
-			"Hola "+wk.NombreCompleto+",\n\nFuiste incluido como candidato en una solicitud de personal en neXus. "+
-				"Mantente disponible; el equipo de neXus dará seguimiento.\n\n— neXus")
+		go s.mailer.Send(wk.Correo, "XolNext · Nueva oportunidad",
+			"Hola "+wk.NombreCompleto+",\n\nFuiste incluido como candidato en una solicitud de personal en XolNext. "+
+				"Mantente disponible; el equipo de XolNext dará seguimiento.\n\n— XolNext")
 	}
 	s.hub.Broadcast(s.persistNotifFull("worker:"+c.WorkerID, "Nueva oportunidad",
 		"Fuiste incluido como candidato en la solicitud "+folio+".",
@@ -849,7 +849,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	ch, unsub := s.hub.Subscribe(aud)
 	defer unsub()
 
-	fmt.Fprintf(w, ": conectado a neXus stream (%s)\n\n", aud)
+	fmt.Fprintf(w, ": conectado a XolNext stream (%s)\n\n", aud)
 	flusher.Flush()
 
 	ctx := r.Context()

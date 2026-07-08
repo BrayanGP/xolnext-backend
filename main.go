@@ -1,4 +1,4 @@
-// Command nexus-backend es el servidor de la plataforma neXus.
+// Command xolnext-backend es el servidor de la plataforma XolNext.
 //
 // Expone una API REST + stream SSE para conectar trabajadores, empresas y un
 // panel de administración interno.
@@ -19,14 +19,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/BrayanGP/nexus-backend/internal/api"
-	"github.com/BrayanGP/nexus-backend/internal/auth"
-	"github.com/BrayanGP/nexus-backend/internal/config"
-	"github.com/BrayanGP/nexus-backend/internal/mailer"
-	"github.com/BrayanGP/nexus-backend/internal/models"
-	"github.com/BrayanGP/nexus-backend/internal/notify"
-	"github.com/BrayanGP/nexus-backend/internal/storage"
-	"github.com/BrayanGP/nexus-backend/internal/store"
+	"github.com/BrayanGP/xolnext-backend/internal/api"
+	"github.com/BrayanGP/xolnext-backend/internal/auth"
+	"github.com/BrayanGP/xolnext-backend/internal/config"
+	"github.com/BrayanGP/xolnext-backend/internal/mailer"
+	"github.com/BrayanGP/xolnext-backend/internal/models"
+	"github.com/BrayanGP/xolnext-backend/internal/notify"
+	"github.com/BrayanGP/xolnext-backend/internal/storage"
+	"github.com/BrayanGP/xolnext-backend/internal/store"
 )
 
 func main() {
@@ -74,7 +74,7 @@ func main() {
 	if cfg.UsePostgres() {
 		engine = "Postgres"
 	}
-	log.Printf("neXus backend escuchando en %s (db: %s, correo: %v)", cfg.Addr, engine, cfg.EmailEnabled())
+	log.Printf("XolNext backend escuchando en %s (db: %s, correo: %v)", cfg.Addr, engine, cfg.EmailEnabled())
 	if err := httpSrv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}

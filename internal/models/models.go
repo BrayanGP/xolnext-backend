@@ -1,6 +1,6 @@
-// Package models define las entidades del dominio de neXus.
+// Package models define las entidades del dominio de XolNext.
 //
-// neXus conecta trabajadores y empresas de oficios. El backend NO actúa como
+// XolNext conecta trabajadores y empresas de oficios. El backend NO actúa como
 // empleador ni procesa pagos: solo gestiona la conexión entre ambas partes,
 // con un administrador interno que filtra trabajadores y arma listas de
 // candidatos (ver requerimientos del MVP).
@@ -197,7 +197,7 @@ type CandidatePublic struct {
 }
 
 // Complaint es una queja o aclaración levantada por un trabajador o empresa.
-// Permite a neXus dar seguimiento formal a incidencias (módulo Quejas y
+// Permite a XolNext dar seguimiento formal a incidencias (módulo Quejas y
 // Aclaraciones del MVP).
 type Complaint struct {
 	ID            string    `json:"id"`
@@ -284,6 +284,6 @@ type User struct {
 }
 
 // DisclaimerLegal es el aviso obligatorio del MVP (requerimiento legal básico).
-const DisclaimerLegal = "neXus funciona como plataforma de conexión entre trabajadores y empresas. " +
-	"neXus no actúa como empleador, no procesa pagos, no garantiza contratación y no administra nómina. " +
+const DisclaimerLegal = "XolNext funciona como plataforma de conexión entre trabajadores y empresas. " +
+	"XolNext no actúa como empleador, no procesa pagos, no garantiza contratación y no administra nómina. " +
 	"Los acuerdos laborales, pagos y condiciones finales son responsabilidad directa entre empresa y trabajador."

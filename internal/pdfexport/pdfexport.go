@@ -7,7 +7,7 @@ package pdfexport
 import (
 	"bytes"
 
-	"github.com/BrayanGP/nexus-backend/internal/models"
+	"github.com/BrayanGP/xolnext-backend/internal/models"
 	"github.com/go-pdf/fpdf"
 )
 
@@ -19,8 +19,8 @@ func CandidateList(req *models.Request, cands []models.CandidatePublic) ([]byte,
 
 	// Encabezado
 	pdf.SetFont("Helvetica", "B", 22)
-	pdf.SetTextColor(13, 27, 62) // navy neXus
-	pdf.CellFormat(0, 12, "neXus  -  Lista de candidatos", "", 1, "L", false, 0, "")
+	pdf.SetTextColor(13, 27, 62) // navy XolNext
+	pdf.CellFormat(0, 12, "XolNext  -  Lista de candidatos", "", 1, "L", false, 0, "")
 	pdf.SetFont("Helvetica", "", 10)
 	pdf.SetTextColor(90, 90, 90)
 	pdf.CellFormat(0, 6, "Conectando talento con oportunidades.", "", 1, "L", false, 0, "")

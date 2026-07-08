@@ -32,7 +32,7 @@ type Config struct {
 	// Correo (opcional). Preferimos la Web API de SendGrid (HTTPS), porque
 	// muchos PaaS (Railway incluido) bloquean los puertos SMTP salientes.
 	SendGridKey string // SENDGRID_API_KEY → usa la Web API por HTTPS
-	MailFrom    string // remitente verificado, ej "neXus <brayangp20@gmail.com>"
+	MailFrom    string // remitente verificado, ej "XolNext <brayangp20@gmail.com>"
 
 	// SMTP como alternativa si no hay SENDGRID_API_KEY.
 	SMTPHost string
@@ -46,7 +46,7 @@ func Load() Config {
 	c := Config{
 		Addr:           ":" + env("PORT", "8080"),
 		DatabaseURL:    os.Getenv("DATABASE_URL"),
-		SQLitePath:     env("NEXUS_DB", "nexus.db"),
+		SQLitePath:     env("XOLNEXT_DB", "xolnext.db"),
 		JWTSecret:      os.Getenv("JWT_SECRET"),
 		StorageBackend: env("STORAGE_BACKEND", "local"),
 		UploadDir:      env("UPLOAD_DIR", "uploads"),
@@ -62,7 +62,7 @@ func Load() Config {
 		SMTPPort:       env("SMTP_PORT", "587"),
 		SMTPUser:       os.Getenv("SMTP_USER"),
 		SMTPPass:       os.Getenv("SMTP_PASS"),
-		SMTPFrom:       env("SMTP_FROM", "neXus <no-reply@nexus.app>"),
+		SMTPFrom:       env("SMTP_FROM", "XolNext <no-reply@nexus.app>"),
 	}
 	// El remitente: MAIL_FROM si existe, si no SMTP_FROM.
 	c.MailFrom = env("MAIL_FROM", c.SMTPFrom)

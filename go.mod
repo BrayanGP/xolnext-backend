@@ -1,4 +1,4 @@
-module github.com/BrayanGP/nexus-backend
+module github.com/BrayanGP/xolnext-backend
 
 go 1.26
 

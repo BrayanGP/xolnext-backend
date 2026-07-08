@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/BrayanGP/nexus-backend/internal/config"
+	"github.com/BrayanGP/xolnext-backend/internal/config"
 )
 
 type Mailer struct {
@@ -102,8 +102,8 @@ func (m *Mailer) SendTest(to string) (bool, string) {
 	if m.Provider() == "none" {
 		return false, "Sin proveedor de correo configurado (define SENDGRID_API_KEY o SMTP_*)."
 	}
-	err := m.Send(to, "neXus · Prueba de correo",
-		"Este es un correo de prueba de neXus. Si lo recibes, el envío funciona correctamente.")
+	err := m.Send(to, "XolNext · Prueba de correo",
+		"Este es un correo de prueba de XolNext. Si lo recibes, el envío funciona correctamente.")
 	if err != nil {
 		return false, err.Error()
 	}
@@ -137,7 +137,7 @@ func buildMessage(from, to, subject, body string) []byte {
 	return []byte(b.String())
 }
 
-// fromAddress extrae "correo@dominio" de un From tipo "neXus <correo@dominio>".
+// fromAddress extrae "correo@dominio" de un From tipo "XolNext <correo@dominio>".
 func fromAddress(from string) string {
 	if i := strings.LastIndex(from, "<"); i >= 0 {
 		if j := strings.LastIndex(from, ">"); j > i {
@@ -147,10 +147,10 @@ func fromAddress(from string) string {
 	return strings.TrimSpace(from)
 }
 
-// fromName extrae el nombre visible (lo previo a "<"); si no hay, usa "neXus".
+// fromName extrae el nombre visible (lo previo a "<"); si no hay, usa "XolNext".
 func fromName(from string) string {
 	if i := strings.Index(from, "<"); i > 0 {
 		return strings.TrimSpace(from[:i])
 	}
-	return "neXus"
+	return "XolNext"
 }

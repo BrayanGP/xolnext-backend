@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/BrayanGP/nexus-backend/internal/auth"
-	"github.com/BrayanGP/nexus-backend/internal/models"
-	"github.com/BrayanGP/nexus-backend/internal/store"
+	"github.com/BrayanGP/xolnext-backend/internal/auth"
+	"github.com/BrayanGP/xolnext-backend/internal/models"
+	"github.com/BrayanGP/xolnext-backend/internal/store"
 )
 
 type ctxKey string
@@ -193,9 +193,9 @@ func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	code := fmt.Sprintf("%06d", rand.IntN(1000000))
 	_ = s.store.SetReset(user.Email, code, time.Now().Add(15*time.Minute))
-	go s.mailer.Send(user.Email, "neXus · Código de recuperación",
+	go s.mailer.Send(user.Email, "XolNext · Código de recuperación",
 		"Tu código para restablecer la contraseña es: "+code+
-			"\n\nVence en 15 minutos. Si no lo solicitaste, ignora este correo.\n\n— neXus")
+			"\n\nVence en 15 minutos. Si no lo solicitaste, ignora este correo.\n\n— XolNext")
 	writeJSON(w, http.StatusOK, ok)
 }
 

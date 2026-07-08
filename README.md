@@ -1,11 +1,11 @@
-# neXus — Backend
+# XolNext — Backend
 
-API del proyecto **neXus**: una plataforma que conecta trabajadores de oficios
+API del proyecto **XolNext**: una plataforma que conecta trabajadores de oficios
 (construcción, demolición, manufactura, limpieza, logística…) con empresas y
 contratistas, con un administrador interno que filtra trabajadores y arma listas
 de candidatos.
 
-> ⚖️ neXus funciona como **plataforma de conexión**. No actúa como empleador, no
+> ⚖️ XolNext funciona como **plataforma de conexión**. No actúa como empleador, no
 > procesa pagos, no garantiza contratación y no administra nómina. Los acuerdos
 > laborales, pagos y condiciones finales son responsabilidad directa entre
 > empresa y trabajador.
@@ -28,7 +28,7 @@ Variables de entorno opcionales:
 | Variable     | Default     | Descripción                       |
 |--------------|-------------|-----------------------------------|
 | `NEXUS_ADDR` | `:8080`     | Dirección de escucha              |
-| `NEXUS_DB`   | `nexus.db`  | Ruta del archivo SQLite           |
+| `XOLNEXT_DB`   | `xolnext.db`  | Ruta del archivo SQLite           |
 
 Al primer arranque se siembran datos de demostración (3 trabajadores, 1 empresa
 y 1 solicitud) para poder probar el panel de administración de inmediato.

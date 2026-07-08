@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/BrayanGP/nexus-backend/internal/config"
+	"github.com/BrayanGP/xolnext-backend/internal/config"
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
