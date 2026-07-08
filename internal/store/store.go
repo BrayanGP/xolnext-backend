@@ -904,6 +904,42 @@ func (s *Store) DeleteCompany(id string) error {
 	return s.exec(`DELETE FROM companies WHERE id=?`, id)
 }
 
+// PurgeTestData elimina TODAS las cuentas cuyo correo coincide con el patrón
+// (ej. "%@test.com") junto con sus perfiles y datos asociados. Pensado para
+// limpiar la contaminación de pruebas sin tocar datos reales.
+func (s *Store) PurgeTestData(emailLike string) (int, error) {
+	rows, err := s.query(`SELECT data FROM users WHERE lower(email) LIKE ?`,
+		strings.ToLower(emailLike))
+	if err != nil {
+		return 0, err
+	}
+	var users []models.User
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		var u models.User
+		if json.Unmarshal([]byte(data), &u) == nil {
+			users = append(users, u)
+		}
+	}
+	rows.Close()
+	n := 0
+	for _, u := range users {
+		if u.WorkerID != "" {
+			_ = s.DeleteWorker(u.WorkerID)
+		}
+		if u.CompanyID != "" {
+			_ = s.DeleteCompany(u.CompanyID)
+		}
+		_ = s.exec(`DELETE FROM users WHERE id=?`, u.ID)
+		n++
+	}
+	return n, nil
+}
+
 // RequestsByCompany devuelve las solicitudes de una empresa (historial).
 func (s *Store) RequestsByCompany(companyID string) ([]models.Request, error) {
 	all, err := s.ListRequests("")

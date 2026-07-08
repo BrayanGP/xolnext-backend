@@ -89,6 +89,7 @@ func (s *Server) Routes() http.Handler {
 	// Diagnóstico (solo admin)
 	mux.HandleFunc("GET /api/admin/diagnostics", s.requireRole(admin, s.diagnostics))
 	mux.HandleFunc("POST /api/admin/mail-test", s.requireRole(admin, s.mailTest))
+	mux.HandleFunc("DELETE /api/admin/test-data", s.requireRole(admin, s.purgeTestData))
 
 	// Trabajadores
 	mux.HandleFunc("GET /api/workers", s.requireRole(admin, s.listWorkers)) // directorio: solo admin
@@ -250,6 +251,22 @@ func (s *Server) mailTest(w http.ResponseWriter, r *http.Request) {
 		"provider": s.mailer.Provider(),
 		"from":     s.mailer.FromAddress(),
 	})
+}
+
+// purgeTestData elimina las cuentas de prueba (correo @test.com) y sus datos.
+// Solo admin. Acepta ?domain= para cambiar el sufijo (por defecto @test.com).
+func (s *Server) purgeTestData(w http.ResponseWriter, r *http.Request) {
+	domain := r.URL.Query().Get("domain")
+	if domain == "" {
+		domain = "@test.com"
+	}
+	n, err := s.store.PurgeTestData("%" + domain)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.memoInvalidate("publicStats")
+	writeJSON(w, http.StatusOK, map[string]any{"eliminadas": n, "dominio": domain})
 }
 
 // updateWorker actualiza el perfil de un trabajador. Solo el dueño o un admin.
